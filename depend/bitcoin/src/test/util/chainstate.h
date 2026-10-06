@@ -6,18 +6,18 @@
 #define BITCOIN_TEST_UTIL_CHAINSTATE_H
 
 #include <clientversion.h>
-#include <logging.h>
 #include <node/context.h>
 #include <node/utxo_snapshot.h>
 #include <rpc/blockchain.h>
 #include <test/util/setup_common.h>
 #include <util/byte_units.h>
 #include <util/fs.h>
+#include <util/log.h>
 #include <validation.h>
 
 #include <univalue.h>
 
-const auto NoMalleation = [](AutoFile& file, node::SnapshotMetadata& meta){};
+inline constexpr auto NoMalleation = [](AutoFile& file, node::SnapshotMetadata& meta){};
 
 /**
  * Create and activate a UTXO snapshot, optionally providing a function to
@@ -78,15 +78,15 @@ CreateAndActivateUTXOSnapshot(
             CBlockIndex *orig_tip = node.chainman->ActiveChainstate().m_chain.Tip();
             uint256 gen_hash = node.chainman->ActiveChainstate().m_chain[0]->GetBlockHash();
             node.chainman->ResetChainstates();
-            node.chainman->InitializeChainstate(node.mempool.get());
+            node.chainman->InitializeChainstate();
             Chainstate& chain = node.chainman->ActiveChainstate();
-            Assert(chain.LoadGenesisBlock());
+            Assert(node.chainman->LoadGenesisBlock());
             // These cache values will be corrected shortly in `MaybeRebalanceCaches`.
-            chain.InitCoinsDB(1_MiB, /*in_memory=*/true, /*should_wipe=*/false);
+            chain.InitCoinsDB(1_MiB, /*in_memory=*/true, /*should_wipe=*/false, node.chainman->m_options.coins_db, node.chainman->m_options.coins_view);
             chain.InitCoinsCache(1_MiB);
             chain.CoinsTip().SetBestBlock(gen_hash);
             chain.LoadChainTip();
-            node.chainman->MaybeRebalanceCaches();
+            Assert(node.chainman->MaybeRebalanceCaches());
 
             // Reset the HAVE_DATA flags below the snapshot height, simulating
             // never-having-downloaded them in the first place.
@@ -109,7 +109,8 @@ CreateAndActivateUTXOSnapshot(
             chain.PopulateBlockIndexCandidates();
         }
         BlockValidationState state;
-        if (!node.chainman->ActiveChainstate().ActivateBestChain(state)) {
+        auto activate_result{node.chainman->ActiveChainstate().ActivateBestChain(state)};
+        if (!activate_result) {
             throw std::runtime_error(strprintf("ActivateBestChain failed. (%s)", state.ToString()));
         }
         Assert(

@@ -14,7 +14,9 @@
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <core_io.h>
+#include <crypto/sha256.h>
 #include <key_io.h>
+#include <logging.h>
 #include <policy/policy.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
@@ -556,7 +558,7 @@ static CAmount AmountFromValue(const UniValue& value)
 {
     if (!value.isNum() && !value.isStr())
         throw std::runtime_error("Amount is not a number or string");
-    CAmount amount;
+    int64_t amount;
     if (!ParseFixedPoint(value.getValStr(), 8, &amount))
         throw std::runtime_error("Invalid amount");
     if (!MoneyRange(amount))
@@ -659,7 +661,9 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& flagStr)
                 UniValue v = prevOut["redeemScript"];
                 std::vector<unsigned char> rsData(ParseHexUV(v, "redeemScript"));
                 CScript redeemScript(rsData.begin(), rsData.end());
-                tempKeystore.AddCScript(redeemScript);
+                if (!tempKeystore.AddCScript(redeemScript)) {
+                    throw std::runtime_error(strprintf("Error adding redeemscript=%s", HexStr(redeemScript)));
+                }
             }
         }
     }
@@ -681,7 +685,7 @@ static void MutateTxSign(CMutableTransaction& tx, const std::string& flagStr)
         SignatureData sigdata = DataFromTransaction(mergedTx, i, coin.out);
         // Only sign SIGHASH_SINGLE if there's a corresponding output:
         if (!fHashSingle || (i < mergedTx.vout.size()))
-            ProduceSignature(keystore, MutableTransactionSignatureCreator(mergedTx, i, amount, nHashType), prevPubKey, sigdata);
+            ProduceSignature(keystore, MutableTransactionSignatureCreator(mergedTx, i, amount, {.sighash_type = nHashType}), prevPubKey, sigdata);
 
         if (amount == MAX_MONEY && !sigdata.scriptWitness.IsNull()) {
             throw std::runtime_error(strprintf("Missing amount for CTxOut with scriptPubKey=%s", HexStr(prevPubKey)));
@@ -857,7 +861,9 @@ static int CommandLineRawTx(int argc, char* argv[])
 
 MAIN_FUNCTION
 {
+    BCLog::Logger logger;
     SetupEnvironment();
+    SHA256AutoDetect();
 
     try {
         int ret = AppInitRawTx(argc, argv);

@@ -29,7 +29,7 @@ void initialize_load_external_block_file()
 FUZZ_TARGET(load_external_block_file, .init = initialize_load_external_block_file)
 {
     FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
-    NodeClockContext clock_ctx{ConsumeTime(fuzzed_data_provider)};
+    FakeNodeClock clock{ConsumeTime(fuzzed_data_provider)};
     FuzzedFileProvider fuzzed_file_provider{fuzzed_data_provider};
     AutoFile fuzzed_block_file{fuzzed_file_provider.open()};
     if (fuzzed_block_file.IsNull()) {
@@ -39,9 +39,9 @@ FUZZ_TARGET(load_external_block_file, .init = initialize_load_external_block_fil
         // Corresponds to the -reindex case (track orphan blocks across files).
         FlatFilePos flat_file_pos;
         std::multimap<uint256, FlatFilePos> blocks_with_unknown_parent;
-        g_setup->m_node.chainman->LoadExternalBlockFile(fuzzed_block_file, &flat_file_pos, &blocks_with_unknown_parent);
+        Assert(g_setup->m_node.chainman->LoadExternalBlockFile(fuzzed_block_file, &flat_file_pos, &blocks_with_unknown_parent));
     } else {
         // Corresponds to the -loadblock= case (orphan blocks aren't tracked across files).
-        g_setup->m_node.chainman->LoadExternalBlockFile(fuzzed_block_file);
+        Assert(g_setup->m_node.chainman->LoadExternalBlockFile(fuzzed_block_file));
     }
 }

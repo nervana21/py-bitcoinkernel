@@ -42,7 +42,7 @@ void initialize_block_index_tree()
 FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
 {
     FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
-    NodeClockContext clock_ctx{ConsumeTime(fuzzed_data_provider)};
+    FakeNodeClock clock{ConsumeTime(fuzzed_data_provider)};
     auto& chainman = static_cast<TestChainstateManager&>(*g_setup->m_node.chainman);
     auto& blockman = static_cast<TestBlockManager&>(chainman.m_blockman);
     CBlockIndex* genesis = chainman.ActiveChainstate().m_chain[0];
@@ -53,8 +53,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
 
     std::vector<CBlockIndex*> pruned_blocks;
 
-    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 1000)
-    {
+    LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 1000) {
         if (abort_run) break;
         CallOneOf(
             fuzzed_data_provider,
@@ -64,7 +63,7 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
                 CBlockIndex* prev_block = PickValue(fuzzed_data_provider, blocks);
                 if (!(prev_block->nStatus & BLOCK_FAILED_VALID)) {
                     CBlockHeader header = ConsumeBlockHeader(fuzzed_data_provider, prev_block->GetBlockHash(), nonce_counter);
-                    CBlockIndex* index = blockman.AddToBlockIndex(header, chainman.m_best_header);
+                    CBlockIndex* index = blockman.AddToBlockIndex(header);
                     assert(index->nStatus & BLOCK_VALID_TREE);
                     assert(index->pprev == prev_block);
                     blocks.push_back(index);
@@ -201,9 +200,10 @@ FUZZ_TARGET(block_index_tree, .init = initialize_block_index_tree)
     // clean up global state changed by last iteration and prepare for next iteration
     {
         LOCK(cs_main);
+        LOCK(blockman.m_index_mutex);
         genesis->nStatus |= BLOCK_HAVE_DATA;
         genesis->nStatus |= BLOCK_HAVE_UNDO;
-        chainman.m_best_header = genesis;
+        blockman.m_best_header = genesis;
         chainman.ResetBestInvalid();
         chainman.nBlockSequenceId = 2;
         chainman.ActiveChain().SetTip(*genesis);

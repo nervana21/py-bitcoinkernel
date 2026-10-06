@@ -4,6 +4,7 @@
 
 #include <test/fuzz/fuzz.h>
 
+#include <logging.h>
 #include <netaddress.h>
 #include <netbase.h>
 #include <test/fuzz/util/check_globals.h>
@@ -80,6 +81,25 @@ void FuzzFrameworkRegisterTarget(std::string_view name, TypeTestOneInput target,
 static std::string_view g_fuzz_target;
 static const TypeTestOneInput* g_test_one_input{nullptr};
 
+class FuzzTestSetup
+{
+public:
+    FuzzTestSetup(const FuzzTargetOptions& options) : m_options{options}
+    {
+        if (m_options.init) m_options.init();
+    }
+    ~FuzzTestSetup()
+    {
+        if (m_options.cleanup) m_options.cleanup();
+    }
+    const FuzzTargetOptions& m_options;
+};
+
+static void test_setup(const FuzzTargetOptions& options)
+{
+    static FuzzTestSetup setup{options};
+}
+
 static void test_one_input(FuzzBufferType buffer)
 {
     CheckGlobals check{};
@@ -92,6 +112,9 @@ const std::function<std::string()> G_TEST_GET_FULL_NAME{[]{
 
 static void initialize()
 {
+    // Initialize logger first because RNG startup uses it.
+    static BCLog::Logger g_logger;
+
     CheckGlobals check{};
     // By default, make the RNG deterministic with a fixed seed. This will affect all
     // randomness during the fuzz test, except:
@@ -100,7 +123,7 @@ static void initialize()
     SeedRandomStateForTest(SeedRand::ZEROS);
 
     // Set time to the genesis block timestamp for deterministic initialization.
-    SetMockTime(1231006505);
+    SetMockTime(1231006505s);
 
     // Terminate immediately if a fuzzing harness ever tries to create a socket.
     // Individual tests can override this by pointing CreateSock to a mocked alternative.
@@ -162,7 +185,7 @@ static void initialize()
     }
     Assert(!g_test_one_input);
     g_test_one_input = &it->second.test_one_input;
-    it->second.opts.init();
+    test_setup(it->second.opts);
 
     ResetCoverageCounters();
 }
@@ -231,7 +254,7 @@ int main(int argc, char** argv)
     // Enable AFL persistent mode. Requires compilation using afl-clang-fast++.
     // See fuzzing.md for details.
     const uint8_t* buffer = __AFL_FUZZ_TESTCASE_BUF;
-    while (__AFL_LOOP(100000)) {
+    while (__AFL_LOOP(100'000)) {
         size_t buffer_len = __AFL_FUZZ_TESTCASE_LEN;
         test_one_input({buffer, buffer_len});
     }

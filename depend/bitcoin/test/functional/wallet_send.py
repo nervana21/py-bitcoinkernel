@@ -7,8 +7,8 @@
 from decimal import Decimal, getcontext
 from itertools import product
 
-from test_framework.authproxy import JSONRPCException
 from test_framework.descriptors import descsum_create
+from test_framework.extendedkey import ExtendedPrivateKey
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_not_equal,
@@ -18,6 +18,7 @@ from test_framework.util import (
     assert_greater_than_or_equal,
     assert_raises_rpc_error,
     count_bytes,
+    JSONRPCException,
 )
 from test_framework.wallet_util import (
     calculate_input_weight,
@@ -31,10 +32,7 @@ class WalletSendTest(BitcoinTestFramework):
         # whitelist peers to speed up tx relay / mempool sync
         self.noban_tx_relay = True
         self.supports_cli = False
-        self.extra_args = [
-            ["-walletrbf=1", "-datacarriersize=16"],
-            ["-walletrbf=1", "-datacarriersize=16"]
-        ]
+        self.extra_args = [["-datacarriersize=16"]] * self.num_nodes
         getcontext().prec = 8 # Satoshi precision for Decimal
 
     def skip_test_if_missing_module(self):
@@ -170,7 +168,6 @@ class WalletSendTest(BitcoinTestFramework):
             # Ensure transaction exists in the wallet:
             tx = from_wallet.gettransaction(res["txid"])
             assert tx
-            assert_equal(tx["bip125-replaceable"], "yes" if replaceable else "no")
             if nonmempool:
                 assert_raises_rpc_error(-5, "No such mempool transaction", from_wallet.getrawtransaction, res["txid"])
                 assert from_wallet.getbalances()["mine"]["nonmempool"] < 0
@@ -198,6 +195,35 @@ class WalletSendTest(BitcoinTestFramework):
 
         return res
 
+    def test_maxfeerate(self):
+        self.log.info("Test that -maxfeerate below -minrelaytxfee is rejected.")
+        # Unload the default wallet so its auto-load doesn't abort startup once
+        # -maxfeerate drops below -minrelaytxfee.
+        self.nodes[0].unloadwallet(self.default_wallet_name, load_on_startup=False)
+        self.restart_node(0, extra_args=['-minrelaytxfee=0.00020000', '-maxfeerate=0.0001'])
+        assert_raises_rpc_error(-4,
+                                "Invalid amount for -maxfeerate=<amount>: '0.0001' "
+                                "(must be at least the minrelay fee of 0.00020000 BTC/kvB "
+                                "to prevent stuck transactions)",
+                                self.nodes[0].createwallet, "w_maxfeerate_below_minrelay")
+        self.restart_node(0)
+        self.nodes[0].loadwallet(self.default_wallet_name, load_on_startup=True)
+
+        self.log.info("test -maxfeerate enforcement on wallet transactions.")
+        # Default maxfeerate is 10,000 sat/vB
+        # Wallet will reject all transactions with fee rate above 10,000 sat/vB.
+        assert_raises_rpc_error(-6, "Fee rate exceeds maximum configured by user (maxfeerate)",
+                                    self.nodes[0].sendtoaddress, address=self.nodes[0].getnewaddress(), amount=1, fee_rate=10001)
+
+        self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), amount=1, fee_rate=9900)
+        self.restart_node(0, extra_args=['-maxfeerate=0.00010'])
+        assert_raises_rpc_error(-6, "Fee rate exceeds maximum configured by user (maxfeerate)",
+                                    self.nodes[0].sendtoaddress, address=self.nodes[0].getnewaddress(), amount=1, fee_rate=11)
+        self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), amount=1, fee_rate=9)
+
+        self.restart_node(0, extra_args=['-maxfeerate=0.00001009'])
+        self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), amount=1, fee_rate=Decimal("1.000"))
+
     def run_test(self):
         self.log.info("Setup wallets...")
         # w0 is a wallet with coinbase rewards
@@ -208,8 +234,9 @@ class WalletSendTest(BitcoinTestFramework):
         # w2 contains the private keys for w3
         self.nodes[1].createwallet(wallet_name="w2", blank=True)
         w2 = self.nodes[1].get_wallet_rpc("w2")
-        xpriv = "tprv8ZgxMBicQKsPfHCsTwkiM1KT56RXbGGTqvc2hgqzycpwbHqqpcajQeMRZoBD35kW4RtyCemu6j34Ku5DEspmgjKdt2qe4SvRch5Kk8B8A2v"
-        xpub = "tpubD6NzVbkrYhZ4YkEfMbRJkQyZe7wTkbTNRECozCtJPtdLRn6cT1QKb8yHjwAPcAr26eHBFYs5iLiFFnCbwPRsncCKUKCfubHDMGKzMVcN1Jg"
+        extendedkey = ExtendedPrivateKey.generate()
+        xpriv = extendedkey.to_string()
+        xpub = extendedkey.pubkey().to_string()
         w2.importdescriptors([{
             "desc": descsum_create("wpkh(" + xpriv + "/0/0/*)"),
             "timestamp": "now",
@@ -395,10 +422,10 @@ class WalletSendTest(BitcoinTestFramework):
         assert res["complete"]
         res = self.test_send(from_wallet=w0, to_wallet=w1, amount=1, add_to_wallet=False, change_address=change_address, change_position=0)
         assert res["complete"]
-        assert_equal(self.nodes[0].decodepsbt(res["psbt"])["tx"]["vout"][0]["scriptPubKey"]["address"], change_address)
+        assert_equal(self.nodes[0].decodepsbt(res["psbt"])["outputs"][0]["script"]["address"], change_address)
         res = self.test_send(from_wallet=w0, to_wallet=w1, amount=1, add_to_wallet=False, change_type="legacy", change_position=0)
         assert res["complete"]
-        change_address = self.nodes[0].decodepsbt(res["psbt"])["tx"]["vout"][0]["scriptPubKey"]["address"]
+        change_address = self.nodes[0].decodepsbt(res["psbt"])["outputs"][0]["script"]["address"]
         assert change_address[0] in ("m", "n")
 
         self.log.info("Set lock time...")
@@ -433,14 +460,6 @@ class WalletSendTest(BitcoinTestFramework):
         # Locked coins are automatically unlocked when manually selected
         res = self.test_send(from_wallet=w0, to_wallet=w1, amount=1, inputs=[utxo1], add_to_wallet=False)
         assert res["complete"]
-
-        self.log.info("Replaceable...")
-        res = self.test_send(from_wallet=w0, to_wallet=w1, amount=1, add_to_wallet=True, replaceable=True)
-        assert res["complete"]
-        assert_equal(self.nodes[0].gettransaction(res["txid"])["bip125-replaceable"], "yes")
-        res = self.test_send(from_wallet=w0, to_wallet=w1, amount=1, add_to_wallet=True, replaceable=False)
-        assert res["complete"]
-        assert_equal(self.nodes[0].gettransaction(res["txid"])["bip125-replaceable"], "no")
 
         self.log.info("Subtract fee from output")
         self.test_send(from_wallet=w0, to_wallet=w1, amount=1, subtract_fee_from_outputs=[0])
@@ -498,11 +517,9 @@ class WalletSendTest(BitcoinTestFramework):
         assert signed["complete"]
 
         dec = self.nodes[0].decodepsbt(signed["psbt"])
-        for i, txin in enumerate(dec["tx"]["vin"]):
-            if txin["txid"] == ext_utxo["txid"] and txin["vout"] == ext_utxo["vout"]:
-                input_idx = i
+        for psbt_in in dec["inputs"]:
+            if psbt_in["previous_txid"] == ext_utxo["txid"] and psbt_in["previous_vout"] == ext_utxo["vout"]:
                 break
-        psbt_in = dec["inputs"][input_idx]
         scriptsig_hex = psbt_in["final_scriptSig"]["hex"] if "final_scriptSig" in psbt_in else ""
         witness_stack_hex = psbt_in["final_scriptwitness"] if "final_scriptwitness" in psbt_in else None
         input_weight = calculate_input_weight(scriptsig_hex, witness_stack_hex)
@@ -539,6 +556,8 @@ class WalletSendTest(BitcoinTestFramework):
 
         # Check tx creation size limits
         self.test_weight_limits()
+
+        self.test_maxfeerate()
 
     def test_weight_limits(self):
         self.log.info("Test weight limits")

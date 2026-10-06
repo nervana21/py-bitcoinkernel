@@ -14,7 +14,9 @@
 #include <kernel/mempool_limits.h>         // IWYU pragma: export
 #include <kernel/mempool_options.h>        // IWYU pragma: export
 #include <kernel/mempool_removal_reason.h> // IWYU pragma: export
+#include <kernel/result.h>
 #include <policy/feerate.h>
+#include <policy/mempool_accept_result.h>
 #include <policy/packages.h>
 #include <primitives/transaction.h>
 #include <primitives/transaction_identifier.h>
@@ -38,24 +40,29 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 class CChain;
+class Chainstate;
 class ValidationSignals;
+class DisconnectedBlockTransactions;
 
 struct bilingual_str;
 
-/** Fake height value used in Coin to signify they are only in the memory pool (since 0.8) */
-static const uint32_t MEMPOOL_HEIGHT = 0x7FFFFFFF;
-
 /** How much linearization cost required for TxGraph clusters to have
  * "acceptable" quality, if they cannot be optimally linearized with less cost. */
-static constexpr uint64_t ACCEPTABLE_COST = 75'000;
+inline constexpr uint64_t ACCEPTABLE_COST = 75'000;
+
+/** How many linearization iterations required for TxGraph clusters to have
+ * "acceptable" quality, if they cannot be optimally linearized with fewer
+ * iterations. */
+static constexpr uint64_t ACCEPTABLE_ITERS = 1'700;
 
 /** How much work we ask TxGraph to do after a mempool change occurs (either
  * due to a changeset being applied, a new block being found, or a reorg). */
-static constexpr uint64_t POST_CHANGE_COST = 5 * ACCEPTABLE_COST;
+inline constexpr uint64_t POST_CHANGE_COST = 5 * ACCEPTABLE_COST;
 
 /**
  * Test whether the LockPoints height and time are still valid on the current chain
@@ -114,7 +121,7 @@ struct TxMempoolInfo
     CTransactionRef tx;
 
     /** Time the transaction entered the mempool. */
-    std::chrono::seconds m_time;
+    MempoolTime m_time;
 
     /** Fee of the transaction. */
     CAmount fee;
@@ -192,7 +199,7 @@ protected:
     CAmount m_total_fee GUARDED_BY(cs){0};       //!< sum of all mempool tx's fees (NOT modified fee)
     uint64_t cachedInnerUsage GUARDED_BY(cs){0}; //!< sum of dynamic memory usage of all the map elements (NOT the maps themselves)
 
-    mutable int64_t lastRollingFeeUpdate GUARDED_BY(cs){GetTime()};
+    mutable MempoolTime lastRollingFeeUpdate GUARDED_BY(cs){Now()};
     mutable bool blockSinceLastRollingFeeBump GUARDED_BY(cs){false};
     mutable double rollingMinimumFeeRate GUARDED_BY(cs){0}; //!< minimum fee to get into the pool, decreases exponentially
 
@@ -209,9 +216,11 @@ protected:
 
 public:
 
-    static const int ROLLING_FEE_HALFLIFE = 60 * 60 * 12; // public only for testing
+    static constexpr auto ROLLING_FEE_HALFLIFE{std::chrono::hours{12}}; // public only for testing
 
-    struct CTxMemPoolEntry_Indices final : boost::multi_index::indexed_by<
+    using indexed_transaction_set = boost::multi_index_container<
+        CTxMemPoolEntry,
+        boost::multi_index::indexed_by<
             // sorted by txid
             boost::multi_index::hashed_unique<mempoolentry_txid, SaltedTxidHasher>,
             // sorted by wtxid
@@ -227,11 +236,7 @@ public:
                 CompareTxMemPoolEntryByEntryTime
             >
         >
-        {};
-    typedef boost::multi_index_container<
-        CTxMemPoolEntry,
-        CTxMemPoolEntry_Indices
-    > indexed_transaction_set;
+    >;
 
     /**
      * This mutex needs to be locked when accessing `mapTx` or other members
@@ -277,8 +282,18 @@ public:
     std::vector<CTxMemPoolEntry::CTxMemPoolEntryRef> GetChildren(const CTxMemPoolEntry &entry) const;
     std::vector<CTxMemPoolEntry::CTxMemPoolEntryRef> GetParents(const CTxMemPoolEntry &entry) const;
 
+    void Lock() {
+        m_lock.emplace(cs, "CTxMemPool::cs", __FILE__, __LINE__);
+    }
+
+    void Unlock() {
+        m_lock.reset();
+    }
+
 private:
     std::vector<indexed_transaction_set::const_iterator> GetSortedScoreWithTopology() const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    std::optional<UniqueLock<RecursiveMutex>> m_lock;
 
     /**
      * Track locally submitted transactions to periodically retry initial broadcast.
@@ -301,6 +316,7 @@ public:
     using Options = kernel::MemPoolOptions;
 
     const Options m_opts;
+    const util::log::Context m_log;
 
     /** Create a new CTxMemPool.
      * Sanity checks will be off by default for performance, because otherwise
@@ -318,6 +334,24 @@ public:
     void check(const CCoinsViewCache& active_coins_tip, int64_t spendheight) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
+     * Make mempool consistent after a reorg, by re-adding or recursively erasing
+     * disconnected block transactions from the mempool, and also removing any
+     * other transactions from the mempool that are no longer valid given the new
+     * tip/height.
+     *
+     * Note: we assume that disconnectpool only contains transactions that are NOT
+     * confirmed in the current chain nor already in the mempool (otherwise,
+     * in-mempool descendants of such transactions would be removed).
+     *
+     * Passing fAddToMempool=false will skip trying to add the transactions back,
+     * and instead just erase from the mempool as needed.
+     */
+    [[nodiscard]] kernel::FlushResult<> MaybeUpdateMempoolForReorg(
+        Chainstate& active_chainstate,
+        DisconnectedBlockTransactions& disconnectpool,
+        bool fAddToMempool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, cs);
+
+    /**
      * Remove a transaction from the mempool along with any descendants.
      * If the transaction is not already in the mempool, find any descendants
      * and remove them.
@@ -331,9 +365,21 @@ public:
      *                                        and updates an entry's LockPoints.
      * */
     void removeForReorg(CChain& chain, std::function<bool(txiter)> filter_final_and_mature) EXCLUSIVE_LOCKS_REQUIRED(cs, cs_main);
-    void removeForBlock(const std::vector<CTransactionRef>& vtx, unsigned int nBlockHeight) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    std::vector<RemovedMempoolTransactionInfo> removeForBlock(const std::vector<CTransactionRef>& vtx) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
-    bool CompareMiningScoreWithTopology(const Wtxid& hasha, const Wtxid& hashb) const;
+    /** Look up wtxids in the mempool and (partially) sort by mining score.
+     *
+     * The @p n_to_sort best entries are removed from @p wtxids and their
+     * corresponding txiter entries are returned. In addition wtxids
+     * that are duplicates or were not found in the mempool are silently
+     * dropped from @p wtxids. The returned vector is ordered from best
+     * to worst (by CompareMainOrder). Entries remaining in @p wtxids
+     * are in unspecified order.
+     *
+     * Note that the returned `txiter` values may become invalidated once
+     * mempool.cs is released.
+     */
+    std::vector<txiter> ExtractBestByMiningScoreWithTopology(std::vector<Wtxid>& wtxids, size_t n_to_sort) const EXCLUSIVE_LOCKS_REQUIRED(cs);
     bool isSpent(const COutPoint& outpoint) const;
     unsigned int GetTransactionsUpdated() const;
     void AddTransactionsUpdated(unsigned int n);
@@ -460,7 +506,7 @@ public:
     void TrimToSize(size_t sizelimit, std::vector<COutPoint>* pvNoSpendsRemaining = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /** Expire all transaction (and their dependencies) in the mempool older than time. Return the number of removed transactions. */
-    int Expire(std::chrono::seconds time) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    int Expire(MempoolTime time) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /**
      * Calculate the ancestor and cluster count for the given transaction.
@@ -514,7 +560,21 @@ public:
 
     const CTxMemPoolEntry* GetEntry(const Txid& txid) const LIFETIMEBOUND EXCLUSIVE_LOCKS_REQUIRED(cs);
 
+    /**
+     * Return a mempool transaction with a given hash.
+     *
+     * @param[in] hash      the txid
+     * @returns             the tx if found, otherwise nullptr
+     */
     CTransactionRef get(const Txid& hash) const;
+
+    /**
+     * Return a mempool transaction with a given witness hash.
+     *
+     * @param[in] hash      the wtxid
+     * @returns             the tx if found, otherwise nullptr
+     */
+    CTransactionRef get(const Wtxid& hash) const;
 
     template <TxidOrWtxid T>
     TxMempoolInfo info(const T& id) const
@@ -552,11 +612,17 @@ public:
     /** Removes a transaction from the unbroadcast set */
     void RemoveUnbroadcastTx(const Txid& txid, bool unchecked = false);
 
-    /** Returns transactions in unbroadcast set */
+    /** Returns a copy of the unbroadcast txid set */
     std::set<Txid> GetUnbroadcastTxs() const
     {
         LOCK(cs);
         return m_unbroadcast_txids;
+    }
+
+    size_t GetUnbroadcastTxCount() const
+    {
+        LOCK(cs);
+        return m_unbroadcast_txids.size();
     }
 
     /** Returns whether a txid is in the unbroadcast set */
@@ -573,6 +639,20 @@ public:
 
     uint64_t GetSequence() const EXCLUSIVE_LOCKS_REQUIRED(cs) {
         return m_sequence_number;
+    }
+
+    /**
+     * Return the current time. Non-static so the time source can be
+     * controlled per instance, enabling dependency injection for testing,
+     * simulation, or other integrations. Also insulates callers from future
+     * changes to the underlying time representation.
+     */
+    MempoolTime Now() const
+    {
+        // It's fine to use nondeterministic times in the mempool even though it
+        // gets linked into the kernel library, because it's just an internal
+        // dependency that's not exposed to applications.
+        return NodeClock::_now_nondet();
     }
 
 private:
@@ -633,7 +713,7 @@ public:
 
         using TxHandle = CTxMemPool::txiter;
 
-        TxHandle StageAddition(const CTransactionRef& tx, CAmount fee, int64_t time, unsigned int entry_height, uint64_t entry_sequence, bool spends_coinbase, int64_t sigops_cost, LockPoints lp);
+        TxHandle StageAddition(const CTransactionRef& tx, CAmount fee, MempoolTime time, unsigned int entry_height, uint64_t entry_sequence, bool spends_coinbase, int64_t sigops_cost, LockPoints lp);
 
         void StageRemoval(CTxMemPool::txiter it);
 
@@ -778,4 +858,39 @@ public:
     /** Clear m_temp_added and m_non_base_coins. */
     void Reset();
 };
+
+/**
+ * Try to add a transaction to the mempool. This is an internal function and is exposed only for testing.
+ * Client code should use ChainstateManager::ProcessTransaction()
+ *
+ * @param[in]  active_chainstate  Reference to the active chainstate.
+ * @param[in]  tx                 The transaction to submit for mempool acceptance.
+ * @param[in]  accept_time        The timestamp for adding the transaction to the mempool.
+ *                                It is also used to determine when the entry expires.
+ * @param[in]  bypass_limits      When true, don't enforce mempool fee and capacity limits,
+ *                                and set entry_sequence to zero.
+ * @param[in]  test_accept        When true, run validation checks but don't submit to mempool.
+ *
+ * @returns a MempoolAcceptResult indicating whether the transaction was accepted/rejected with reason.
+ */
+[[nodiscard]] std::tuple<MempoolAcceptResult, kernel::FlushResult<void, kernel::AbortFailure>> AcceptToMemoryPool(Chainstate& active_chainstate, const CTransactionRef& tx, CTxMemPool& pool,
+                                       int64_t accept_time, bool bypass_limits, bool test_accept)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+/**
+* Validate (and maybe submit) a package to the mempool. See doc/policy/packages.md for full details
+* on package validation rules.
+* @param[in]    test_accept         When true, run validation checks but don't submit to mempool.
+* @param[in]    client_maxfeerate    If exceeded by an individual transaction, rest of (sub)package evaluation is aborted.
+*                                   Only for sanity checks against local submission of transactions.
+* @returns a PackageMempoolAcceptResult which includes a MempoolAcceptResult for each transaction.
+* If a transaction fails, validation will exit early and some results may be missing. It is also
+* possible for the package to be partially submitted.
+*/
+[[nodiscard]] std::tuple<PackageMempoolAcceptResult, kernel::FlushResult<void, kernel::AbortFailure>> ProcessNewPackage(Chainstate& active_chainstate, CTxMemPool& pool,
+                                                   const Package& txns, bool test_accept, const std::optional<CFeeRate>& client_maxfeerate) LOCKS_EXCLUDED(cs_main);
+
+/* Mempool validation helper functions */
+
+
 #endif // BITCOIN_TXMEMPOOL_H

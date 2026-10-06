@@ -5,6 +5,7 @@
 #include <addresstype.h>
 #include <consensus/validation.h>
 #include <net_processing.h>
+#include <node/transaction.h>
 #include <node/txdownloadman_impl.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
@@ -114,8 +115,7 @@ static CTransactionRef CreatePlaceholderTx(bool segwit)
 BOOST_FIXTURE_TEST_CASE(tx_rejection_types, TestChain100Setup)
 {
     CTxMemPool& pool = *Assert(m_node.mempool);
-    FastRandomContext det_rand{true};
-    node::TxDownloadOptions DEFAULT_OPTS{pool, det_rand, true};
+    node::TxDownloadOptions DEFAULT_OPTS{.m_mempool = pool, .m_deterministic_txrequest = true};
 
     // A new TxDownloadManagerImpl is created for each tx so we can just reuse the same one.
     TxValidationState state;
@@ -172,8 +172,7 @@ BOOST_FIXTURE_TEST_CASE(tx_rejection_types, TestChain100Setup)
 BOOST_FIXTURE_TEST_CASE(handle_missing_inputs, TestChain100Setup)
 {
     CTxMemPool& pool = *Assert(m_node.mempool);
-    FastRandomContext det_rand{true};
-    node::TxDownloadOptions DEFAULT_OPTS{pool, det_rand, true};
+    node::TxDownloadOptions DEFAULT_OPTS{.m_mempool = pool, .m_deterministic_txrequest = true};
     NodeId nodeid{1};
     node::TxDownloadConnectionInfo DEFAULT_CONN{/*m_preferred=*/false, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true};
 
@@ -222,7 +221,8 @@ BOOST_FIXTURE_TEST_CASE(handle_missing_inputs, TestChain100Setup)
         if (parent_recent_rej_recon) txdownload_impl.RecentRejectsReconsiderableFilter().insert(single_parent->GetHash().ToUint256());
         if (parent_recent_conf) txdownload_impl.RecentConfirmedTransactionsFilter().insert(single_parent->GetHash().ToUint256());
         if (parent_in_mempool) {
-            const auto mempool_result = WITH_LOCK(::cs_main, return m_node.chainman->ProcessTransaction(single_parent));
+            auto [mempool_result, flush_result]{node::ProcessTransaction(single_parent, m_node)};
+            Assert(flush_result);
             BOOST_CHECK(mempool_result.m_result_type == MempoolAcceptResult::ResultType::VALID);
             coinbase_idx += 1;
             assert(coinbase_idx < m_coinbase_txns.size());

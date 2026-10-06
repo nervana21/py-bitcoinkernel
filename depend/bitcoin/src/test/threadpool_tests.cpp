@@ -6,6 +6,7 @@
 #include <logging.h>
 #include <random.h>
 #include <test/util/common.h>
+#include <test/util/setup_common.h>
 #include <util/string.h>
 #include <util/threadpool.h>
 #include <util/time.h>
@@ -18,12 +19,17 @@
 #include <ranges>
 #include <semaphore>
 
+// Undefine Windows WAIT_TIMEOUT macro (WinError.h) to avoid name collision.
+#ifdef WAIT_TIMEOUT
+#undef WAIT_TIMEOUT
+#endif
+
 // General test values
 int NUM_WORKERS_DEFAULT = 0;
 constexpr char POOL_NAME[] = "test";
 constexpr auto TEST_WAIT_TIMEOUT = 120s;
 
-struct ThreadPoolFixture {
+struct ThreadPoolFixture : public BasicTestingSetup {
     ThreadPoolFixture() {
         NUM_WORKERS_DEFAULT = FastRandomContext().randrange(GetNumCores()) + 1;
         LogInfo("thread pool workers count: %d", NUM_WORKERS_DEFAULT);
@@ -381,11 +387,7 @@ BOOST_AUTO_TEST_CASE(start_mid_stop_does_not_deadlock)
     // Restart the pool and resume workers so the stopper thread can proceed.
     // This will throw an exception only if the pool handles Start-Stop race properly,
     // otherwise it will proceed and hang the stopper_thread.
-    try {
-        threadPool.Start(NUM_WORKERS_DEFAULT);
-    } catch (std::exception& e) {
-        BOOST_CHECK_EQUAL(e.what(), "Thread pool has been interrupted or is stopping");
-    }
+    BOOST_CHECK_EXCEPTION(threadPool.Start(NUM_WORKERS_DEFAULT), std::runtime_error, HasReason{"Thread pool has been interrupted or is stopping"});
     workers_blocker.release(NUM_WORKERS_DEFAULT);
     WAIT_FOR(blocking_tasks);
 

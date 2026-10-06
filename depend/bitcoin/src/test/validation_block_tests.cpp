@@ -2,26 +2,43 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <boost/test/unit_test.hpp>
-
+#include <chain.h>
 #include <chainparams.h>
+#include <consensus/consensus.h>
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
+#include <node/block_template_manager.h>
+#include <node/blockstorage.h>
 #include <node/miner.h>
+#include <node/transaction.h>
 #include <pow.h>
+#include <primitives/block.h>
+#include <primitives/transaction.h>
 #include <random.h>
+#include <script/script.h>
+#include <sync.h>
 #include <test/util/common.h>
-#include <test/util/random.h>
 #include <test/util/script.h>
 #include <test/util/setup_common.h>
-#include <util/time.h>
+#include <txmempool.h>
+#include <uint256.h>
+#include <util/check.h>
 #include <validation.h>
 #include <validationinterface.h>
 
-#include <thread>
+#include <boost/test/unit_test.hpp>
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <thread>
+#include <utility>
+#include <vector>
+
+using kernel::AbortFailure;
 using kernel::ChainstateRole;
-using node::BlockAssembler;
+using kernel::FlushResult;
 
 namespace validation_block_tests {
 struct MinerTestingSetup : public RegTestingSetup {
@@ -67,11 +84,12 @@ std::shared_ptr<CBlock> MinerTestingSetup::Block(const uint256& prev_hash)
     static int i = 0;
     static uint64_t time = Params().GenesisBlock().nTime;
 
-    BlockAssembler::Options options;
-    options.coinbase_output_script = CScript{} << i++ << OP_TRUE;
-    options.include_dummy_extranonce = true;
-    auto ptemplate = BlockAssembler{m_node.chainman->ActiveChainstate(), m_node.mempool.get(), options}.CreateNewBlock();
-    auto pblock = std::make_shared<CBlock>(ptemplate->block);
+    auto& block_template_manager{*Assert(m_node.block_template_manager)};
+    auto block_template{block_template_manager.CreateNewTemplate({
+        .coinbase_output_script = CScript{} << i++ << OP_TRUE,
+    })};
+    BOOST_REQUIRE(block_template);
+    auto pblock = std::make_shared<CBlock>(block_template->block);
     pblock->hashPrevBlock = prev_hash;
     pblock->nTime = ++time;
 
@@ -163,9 +181,11 @@ BOOST_AUTO_TEST_CASE(processnewblock_signals_ordering)
         BuildChain(Params().GenesisBlock().GetHash(), 100, 15, 10, 500, blocks);
     }
 
+    FlushResult<void, AbortFailure> process_result;
     bool ignored;
     // Connect the genesis block and drain any outstanding events
-    BOOST_CHECK(Assert(m_node.chainman)->ProcessNewBlock(std::make_shared<CBlock>(Params().GenesisBlock()), true, true, &ignored));
+    BOOST_CHECK(Assert(m_node.chainman)->ProcessNewBlock(std::make_shared<CBlock>(Params().GenesisBlock()), true, true, &ignored, process_result));
+    BOOST_CHECK(process_result);
     m_node.validation_signals->SyncWithValidationInterfaceQueue();
 
     // subscribe to events (this subscriber will validate event ordering)
@@ -188,14 +208,18 @@ BOOST_AUTO_TEST_CASE(processnewblock_signals_ordering)
             FastRandomContext insecure;
             for (int i = 0; i < 1000; i++) {
                 const auto& block = blocks[insecure.randrange(blocks.size() - 1)];
-                Assert(m_node.chainman)->ProcessNewBlock(block, true, true, &ignored);
+                FlushResult<void, AbortFailure> process_result;
+                (void)Assert(m_node.chainman)->ProcessNewBlock(block, true, true, &ignored, process_result);
+                Assert(process_result);
             }
 
             // to make sure that eventually we process the full chain - do it here
             for (const auto& block : blocks) {
                 if (block->vtx.size() == 1) {
-                    bool processed = Assert(m_node.chainman)->ProcessNewBlock(block, true, true, &ignored);
+                    FlushResult<void, AbortFailure> process_result;
+                    bool processed = Assert(m_node.chainman)->ProcessNewBlock(block, true, true, &ignored, process_result);
                     assert(processed);
+                    Assert(process_result);
                 }
             }
         });
@@ -233,7 +257,10 @@ BOOST_AUTO_TEST_CASE(mempool_locks_reorg)
 {
     bool ignored;
     auto ProcessBlock = [&](std::shared_ptr<const CBlock> block) -> bool {
-        return Assert(m_node.chainman)->ProcessNewBlock(block, /*force_processing=*/true, /*min_pow_checked=*/true, /*new_block=*/&ignored);
+        FlushResult<void, AbortFailure> process_result;
+        bool ret{Assert(m_node.chainman)->ProcessNewBlock(block, /*force_processing=*/true, /*min_pow_checked=*/true, /*new_block=*/&ignored, process_result)};
+        BOOST_CHECK(process_result);
+        return ret;
     };
 
     // Process all mined blocks
@@ -282,10 +309,10 @@ BOOST_AUTO_TEST_CASE(mempool_locks_reorg)
 
         // Add the txs to the tx pool
         {
-            LOCK(cs_main);
             for (const auto& tx : txs) {
-                const MempoolAcceptResult result = m_node.chainman->ProcessTransaction(tx);
+                auto [result, flush_result]{node::ProcessTransaction(tx, m_node)};
                 BOOST_REQUIRE(result.m_result_type == MempoolAcceptResult::ResultType::VALID);
+                BOOST_CHECK(flush_result);
             }
         }
 
@@ -336,11 +363,12 @@ BOOST_AUTO_TEST_CASE(witness_commitment_index)
     LOCK(Assert(m_node.chainman)->GetMutex());
     CScript pubKey;
     pubKey << 1 << OP_TRUE;
-    BlockAssembler::Options options;
-    options.coinbase_output_script = pubKey;
-    options.include_dummy_extranonce = true;
-    auto ptemplate = BlockAssembler{m_node.chainman->ActiveChainstate(), m_node.mempool.get(), options}.CreateNewBlock();
-    CBlock pblock = ptemplate->block;
+    auto& block_template_manager{*Assert(m_node.block_template_manager)};
+    auto block_template{block_template_manager.CreateNewTemplate({
+        .coinbase_output_script = pubKey,
+    })};
+    BOOST_REQUIRE(block_template);
+    CBlock pblock{block_template->block};
 
     CTxOut witness;
     witness.scriptPubKey.resize(MINIMUM_WITNESS_COMMITMENT);

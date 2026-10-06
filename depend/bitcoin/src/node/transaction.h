@@ -6,12 +6,18 @@
 #define BITCOIN_NODE_TRANSACTION_H
 
 #include <common/messages.h>
+#include <kernel/cs_main.h>
+#include <kernel/result.h>
 #include <node/types.h>
 #include <policy/feerate.h>
+#include <policy/mempool_accept_result.h>
 #include <primitives/transaction.h>
+
+#include <tuple>
 
 class CBlockIndex;
 class CTxMemPool;
+class Chainstate;
 namespace Consensus {
 struct Params;
 }
@@ -25,13 +31,29 @@ struct NodeContext;
  * By default, a transaction with a fee rate higher than this will be rejected
  * by these RPCs and the GUI. This can be overridden with the maxfeerate argument.
  */
-static const CFeeRate DEFAULT_MAX_RAW_TX_FEE_RATE{COIN / 10};
+inline constexpr CFeeRate DEFAULT_MAX_RAW_TX_FEE_RATE{COIN / 10};
 
 /** Maximum burn value for sendrawtransaction, submitpackage, and testmempoolaccept RPC calls.
  * By default, a transaction with a burn value higher than this will be rejected
  * by these RPCs and the GUI. This can be overridden with the maxburnamount argument.
  */
-static const CAmount DEFAULT_MAX_BURN_AMOUNT{0};
+inline constexpr CAmount DEFAULT_MAX_BURN_AMOUNT{0};
+
+/**
+ * Try to add a transaction to the memory pool.
+ *
+ * @param[in]  tx              The transaction to submit for mempool acceptance.
+ * @param[in]  test_accept     When true, run validation checks but don't submit to mempool.
+ */
+[[nodiscard]] std::tuple<MempoolAcceptResult, kernel::FlushResult<void, kernel::AbortFailure>> ProcessTransaction(const CTransactionRef& tx, Chainstate& chainstate, CTxMemPool& mempool, bool test_accept=false) LOCKS_EXCLUDED(cs_main);
+
+/**
+ * Try to add a transaction to the memory pool.
+ *
+ * @param[in]  tx              The transaction to submit for mempool acceptance.
+ * @param[in]  test_accept     When true, run validation checks but don't submit to mempool.
+ */
+[[nodiscard]] std::tuple<MempoolAcceptResult, kernel::FlushResult<void, kernel::AbortFailure>> ProcessTransaction(const CTransactionRef& tx, const NodeContext& node, bool test_accept=false) LOCKS_EXCLUDED(cs_main);
 
 /**
  * Submit a transaction to the mempool and (optionally) relay it to all P2P peers.
@@ -46,6 +68,7 @@ static const CAmount DEFAULT_MAX_BURN_AMOUNT{0};
  * @param[in]  tx the transaction to broadcast
  * @param[out] err_string reference to std::string to fill with error string if available
  * @param[in]  max_tx_fee reject txs with fees higher than this (if 0, accept any fee)
+ * @param[in]  max_tx_fee_rate reject txs with fee rate higher than this (if CFeeRate(0), the fee rate is not checked)
  * @param[in]  broadcast_method whether to add the transaction to the mempool and how to broadcast it
  * @param[in]  wait_callback wait until callbacks have been processed to avoid stale result due to a sequentially RPC.
  * return error
@@ -54,6 +77,7 @@ static const CAmount DEFAULT_MAX_BURN_AMOUNT{0};
                                                     CTransactionRef tx,
                                                     std::string& err_string,
                                                     const CAmount& max_tx_fee,
+                                                    const CFeeRate& max_tx_fee_rate,
                                                     TxBroadcast broadcast_method,
                                                     bool wait_callback);
 

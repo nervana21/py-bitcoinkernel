@@ -2,26 +2,50 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <chain.h>
+#include <consensus/amount.h>
+#include <consensus/consensus.h>
 #include <consensus/validation.h>
-#include <node/context.h>
-#include <node/mempool_args.h>
-#include <node/miner.h>
+#include <node/mining_types.h>
+#include <policy/feerate.h>
+#include <policy/packages.h>
+#include <policy/policy.h>
+#include <policy/settings.h>
 #include <policy/truc_policy.h>
+#include <primitives/transaction.h>
+#include <script/script.h>
+#include <sync.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
 #include <test/fuzz/util/mempool.h>
 #include <test/util/mining.h>
+#include <test/util/random.h>
 #include <test/util/script.h>
 #include <test/util/setup_common.h>
 #include <test/util/txmempool.h>
+#include <txmempool.h>
 #include <util/check.h>
-#include <util/rbf.h>
+#include <util/hasher.h>
+#include <util/time.h>
 #include <util/translation.h>
 #include <validation.h>
 #include <validationinterface.h>
 
-using node::BlockAssembler;
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <iterator>
+#include <limits>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <span>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 using node::NodeContext;
 
 namespace {
@@ -33,7 +57,7 @@ struct MockedTxPool : public CTxMemPool {
     void RollingFeeUpdate() EXCLUSIVE_LOCKS_REQUIRED(!cs)
     {
         LOCK(cs);
-        lastRollingFeeUpdate = GetTime();
+        lastRollingFeeUpdate = Now();
         blockSinceLastRollingFeeBump = true;
     }
 };
@@ -44,12 +68,10 @@ void initialize_tx_pool()
     g_setup = testing_setup.get();
     SetMockTime(WITH_LOCK(g_setup->m_node.chainman->GetMutex(), return g_setup->m_node.chainman->ActiveTip()->Time()));
 
-    BlockAssembler::Options options;
-    options.coinbase_output_script = P2WSH_EMPTY;
-    options.include_dummy_extranonce = true;
-
     for (int i = 0; i < 2 * COINBASE_MATURITY; ++i) {
-        COutPoint prevout{MineBlock(g_setup->m_node, options)};
+        COutPoint prevout{MineBlock(g_setup->m_node, {
+            .coinbase_output_script = P2WSH_EMPTY,
+        })};
         if (i < COINBASE_MATURITY) {
             // Remember the txids to avoid expensive disk access later on
             g_outpoints_coinbase_init_mature.push_back(prevout);
@@ -213,10 +235,7 @@ FUZZ_TARGET(ephemeral_package_eval, .init = initialize_tx_pool)
     auto tx_pool_{MakeEphemeralMempool(node)};
     MockedTxPool& tx_pool = *static_cast<MockedTxPool*>(tx_pool_.get());
 
-    chainstate.SetMempool(&tx_pool);
-
-    LIMITED_WHILE(fuzzed_data_provider.remaining_bytes() > 0, 300)
-    {
+    LIMITED_WHILE (fuzzed_data_provider.remaining_bytes() > 0, 300) {
         Assert(!mempool_outpoints.empty());
 
         std::vector<CTransactionRef> txs;
@@ -320,11 +339,13 @@ FUZZ_TARGET(ephemeral_package_eval, .init = initialize_tx_pool)
 
         auto single_submit = txs.size() == 1;
 
-        const auto result_package = WITH_LOCK(::cs_main,
-                                    return ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/single_submit, /*client_maxfeerate=*/{}));
+        auto [result_package, process_result]{ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/single_submit, /*client_maxfeerate=*/{})};
+        Assert(process_result);
 
-        const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), GetTime(),
-                                   /*bypass_limits=*/false, /*test_accept=*/!single_submit));
+        auto [res, flush_result]{WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), tx_pool, GetTime(),
+                                   /*bypass_limits=*/false, /*test_accept=*/!single_submit))};
+        Assert(flush_result);
+        (void)res;
 
         if (!single_submit && result_package.m_state.GetResult() != PackageValidationResult::PCKG_POLICY) {
             // We don't know anything about the validity since transactions were randomly generated, so
@@ -368,10 +389,7 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
     auto tx_pool_{MakeMempool(fuzzed_data_provider, node)};
     MockedTxPool& tx_pool = *static_cast<MockedTxPool*>(tx_pool_.get());
 
-    chainstate.SetMempool(&tx_pool);
-
-    LIMITED_WHILE(fuzzed_data_provider.remaining_bytes() > 0, 300)
-    {
+    LIMITED_WHILE (fuzzed_data_provider.remaining_bytes() > 0, 300) {
         Assert(!mempool_outpoints.empty());
 
         std::vector<CTransactionRef> txs;
@@ -495,13 +513,14 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
             client_maxfeerate = CFeeRate(fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(-1, 50 * COIN), 100);
         }
 
-        const auto result_package = WITH_LOCK(::cs_main,
-                                    return ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/single_submit, client_maxfeerate));
+        auto [result_package, process_result]{ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/single_submit, client_maxfeerate)};
+        Assert(process_result);
 
         // Always set bypass_limits to false because it is not supported in ProcessNewPackage and
         // can be a source of divergence.
-        const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), GetTime(),
-                                   /*bypass_limits=*/false, /*test_accept=*/!single_submit));
+        auto [res, flush_result]{WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), tx_pool, GetTime(),
+                                   /*bypass_limits=*/false, /*test_accept=*/!single_submit))};
+        Assert(flush_result);
         const bool passed = res.m_result_type == MempoolAcceptResult::ResultType::VALID;
 
         node.validation_signals->SyncWithValidationInterfaceQueue();

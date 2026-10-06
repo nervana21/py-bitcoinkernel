@@ -6,7 +6,6 @@
 
 #include <clientversion.h>
 #include <consensus/amount.h>
-#include <logging.h>
 #include <primitives/transaction.h>
 #include <random.h>
 #include <serialize.h>
@@ -16,6 +15,7 @@
 #include <uint256.h>
 #include <util/fs.h>
 #include <util/fs_helpers.h>
+#include <util/log.h>
 #include <util/obfuscation.h>
 #include <util/signalinterrupt.h>
 #include <util/syserror.h>
@@ -34,20 +34,28 @@
 #include <vector>
 
 using fsbridge::FopenFn;
+using kernel::FlushResult;
+using kernel::Interrupted;
+using kernel::InterruptResult;
 
 namespace node {
 
 static const uint64_t MEMPOOL_DUMP_VERSION_NO_XOR_KEY{1};
 static const uint64_t MEMPOOL_DUMP_VERSION{2};
 
-bool LoadMempool(CTxMemPool& pool, const fs::path& load_path, Chainstate& active_chainstate, ImportMempoolOptions&& opts)
+FlushResult<InterruptResult> LoadMempool(CTxMemPool& pool, const fs::path& load_path, Chainstate& active_chainstate, ImportMempoolOptions&& opts)
 {
-    if (load_path.empty()) return false;
+    FlushResult<InterruptResult> result;
+    if (load_path.empty()) {
+        result.update(util::Error{});
+        return result;
+    }
 
     AutoFile file{opts.mockable_fopen_function(load_path, "rb")};
     if (file.IsNull()) {
         LogInfo("Failed to open mempool file. Continuing anyway.\n");
-        return false;
+        result.update(util::Error{});
+        return result;
     }
 
     int64_t count = 0;
@@ -68,7 +76,8 @@ bool LoadMempool(CTxMemPool& pool, const fs::path& load_path, Chainstate& active
             file >> obfuscation;
             file.SetObfuscation(obfuscation);
         } else {
-            return false;
+            result.update(util::Error{});
+            return result;
         }
 
         uint64_t total_txns_to_load;
@@ -95,6 +104,13 @@ bool LoadMempool(CTxMemPool& pool, const fs::path& load_path, Chainstate& active
             if (opts.use_current_time) {
                 nTime = TicksSinceEpoch<std::chrono::seconds>(now);
             }
+            // Reject nTime values that cannot be represented as MempoolTime.
+            constexpr int64_t MAX_MEMPOOL_TIME{
+                std::chrono::time_point_cast<std::chrono::seconds>(MempoolTime::max())
+                    .time_since_epoch().count()};
+            if (nTime < 0 || nTime > MAX_MEMPOOL_TIME) {
+                throw std::runtime_error(strprintf("Mempool entry nTime value %d is out of range", nTime));
+            }
 
             CAmount amountdelta = nFeeDelta;
             if (amountdelta && opts.apply_fee_delta_priority) {
@@ -102,7 +118,9 @@ bool LoadMempool(CTxMemPool& pool, const fs::path& load_path, Chainstate& active
             }
             if (nTime > TicksSinceEpoch<std::chrono::seconds>(now - pool.m_opts.expiry)) {
                 LOCK(cs_main);
-                const auto& accepted = AcceptToMemoryPool(active_chainstate, tx, nTime, /*bypass_limits=*/false, /*test_accept=*/false);
+                // Ignore failure value, do not treat flush error as failure.
+                auto [accepted, flush_result] = AcceptToMemoryPool(active_chainstate, tx, pool, nTime, /*bypass_limits=*/false, /*test_accept=*/false);
+                flush_result >> result;
                 if (accepted.m_result_type == MempoolAcceptResult::ResultType::VALID) {
                     ++count;
                 } else {
@@ -119,8 +137,10 @@ bool LoadMempool(CTxMemPool& pool, const fs::path& load_path, Chainstate& active
             } else {
                 ++expired;
             }
-            if (active_chainstate.m_chainman.m_interrupt)
-                return false;
+            if (active_chainstate.m_chainman.m_interrupt) {
+                result.update(Interrupted{});
+                return result;
+            }
         }
         std::map<Txid, CAmount> mapDeltas;
         file >> mapDeltas;
@@ -143,11 +163,12 @@ bool LoadMempool(CTxMemPool& pool, const fs::path& load_path, Chainstate& active
         }
     } catch (const std::exception& e) {
         LogInfo("Failed to deserialize mempool data on file: %s. Continuing anyway.\n", e.what());
-        return false;
+        result.update(util::Error{});
+        return result;
     }
 
     LogInfo("Imported mempool transactions from file: %i succeeded, %i failed, %i expired, %i already there, %i waiting for initial broadcast\n", count, failed, expired, already_there, unbroadcast);
-    return true;
+    return result;
 }
 
 bool DumpMempool(const CTxMemPool& pool, const fs::path& dump_path, FopenFn mockable_fopen_function, bool skip_file_commit)
@@ -195,7 +216,7 @@ bool DumpMempool(const CTxMemPool& pool, const fs::path& dump_path, FopenFn mock
         LogInfo("Writing %u mempool transactions to file...\n", mempool_transactions_to_write);
         for (const auto& i : vinfo) {
             file << TX_WITH_WITNESS(*(i.tx));
-            file << int64_t{count_seconds(i.m_time)};
+            file << int64_t{TicksSinceEpoch<std::chrono::seconds>(i.m_time)};
             file << int64_t{i.nFeeDelta};
             mapDeltas.erase(i.tx->GetHash());
         }

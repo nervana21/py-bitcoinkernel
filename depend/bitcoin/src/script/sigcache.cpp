@@ -9,15 +9,14 @@
 #include <pubkey.h>
 #include <random.h>
 #include <script/interpreter.h>
-#include <span.h>
 #include <uint256.h>
 #include <util/log.h>
 
-#include <mutex>
-#include <shared_mutex>
 #include <vector>
 
-SignatureCache::SignatureCache(const size_t max_size_bytes)
+#define LOG_REQUIRE_CONTEXT true
+
+SignatureCache::SignatureCache(util::log::Logger& logger, const size_t max_size_bytes)
 {
     uint256 nonce = GetRandHash();
     // We want the nonce to be 64 bytes long to force the hasher to process
@@ -31,8 +30,9 @@ SignatureCache::SignatureCache(const size_t max_size_bytes)
     m_salted_hasher_schnorr.Write(nonce.begin(), 32);
     m_salted_hasher_schnorr.Write(PADDING_SCHNORR, 32);
 
-    const auto [num_elems, approx_size_bytes] = setValid.setup_bytes(max_size_bytes);
-    LogInfo("Using %zu MiB out of %zu MiB requested for signature cache, able to store %zu elements",
+    const auto [num_elems, approx_size_bytes] = WITH_LOCK(setValid.m_mutex, return setValid.setup_bytes(max_size_bytes));
+    const util::log::Context log{BCLog::VALIDATION, &logger};
+    LogInfo(log, "Using %zu MiB out of %zu MiB requested for signature cache, able to store %zu elements",
               approx_size_bytes >> 20, max_size_bytes >> 20, num_elems);
 }
 
@@ -50,13 +50,13 @@ void SignatureCache::ComputeEntrySchnorr(uint256& entry, const uint256& hash, st
 
 bool SignatureCache::Get(const uint256& entry, const bool erase)
 {
-    std::shared_lock<std::shared_mutex> lock(cs_sigcache);
+    LOCK(setValid.m_mutex);
     return setValid.contains(entry, erase);
 }
 
 void SignatureCache::Set(const uint256& entry)
 {
-    std::unique_lock<std::shared_mutex> lock(cs_sigcache);
+    LOCK(setValid.m_mutex);
     setValid.insert(entry);
 }
 

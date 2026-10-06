@@ -12,20 +12,27 @@
 #include <kernel/cs_main.h>
 #include <sync.h>
 #include <util/fs.h>
+#include <util/log.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 class COutPoint;
 class uint256;
 
+namespace kernel {
+class CoinsStore;
+}
+
 //! User-controlled performance and debug options.
 struct CoinsViewOptions {
     //! Maximum database write batch size in bytes.
-    size_t batch_write_bytes{DEFAULT_DB_CACHE_BATCH};
+    uint64_t batch_write_bytes{DEFAULT_DB_CACHE_BATCH};
     //! If non-zero, randomly exit when the database is flushed with (1/ratio) probability.
     int simulate_crash_ratio{0};
 };
@@ -34,11 +41,16 @@ struct CoinsViewOptions {
 class CCoinsViewDB final : public CCoinsView
 {
 protected:
+    const util::log::Context m_log;
     DBParams m_db_params;
     CoinsViewOptions m_options;
-    std::unique_ptr<CDBWrapper> m_db;
+    //! Coins store. One writer, many readers. Same file shape as the block tree store.
+    mutable Mutex m_db_mutex;
+    std::unique_ptr<kernel::CoinsStore> m_db;
+    std::shared_future<void> m_compaction;
 public:
-    explicit CCoinsViewDB(DBParams db_params, CoinsViewOptions options);
+    explicit CCoinsViewDB(util::log::Logger& logger, DBParams db_params, CoinsViewOptions options);
+    ~CCoinsViewDB() override;
 
     std::optional<Coin> GetCoin(const COutPoint& outpoint) const override;
     std::optional<Coin> PeekCoin(const COutPoint& outpoint) const override;
@@ -46,14 +58,21 @@ public:
     uint256 GetBestBlock() const override;
     std::vector<uint256> GetHeadBlocks() const override;
     void BatchWrite(CoinsViewCacheCursor& cursor, const uint256& block_hash) override;
-    std::unique_ptr<CCoinsViewCursor> Cursor() const override;
+    //! Get a cursor to iterate over the whole state.
+    std::unique_ptr<CCoinsViewCursor> Cursor() const;
 
     //! Whether an unsupported database format is used.
     bool NeedsUpgrade();
     size_t EstimateSize() const override;
 
-    //! Dynamically alter the underlying leveldb cache size.
-    void ResizeCache(size_t new_cache_size) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    //! No separate cache. Kept so callers can still invoke it.
+    void ResizeCache(size_t new_cache_size) EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_db_mutex);
+
+    //! The coins store is one file. Compaction is a no-op.
+    std::shared_future<void> CompactFullAsync() EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_db_mutex);
+
+    //! LevelDB properties are not available on this store.
+    std::optional<std::string> GetDBProperty(const std::string& property);
 };
 
 #endif // BITCOIN_TXDB_H

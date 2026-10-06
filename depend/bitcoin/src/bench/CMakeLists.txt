@@ -52,8 +52,10 @@ add_executable(bench_bitcoin
   strencodings.cpp
   txgraph.cpp
   txorphanage.cpp
+  uint256_blob.cpp
   util_time.cpp
   verify_script.cpp
+  write_block_index.cpp
 )
 
 add_windows_application_manifest(bench_bitcoin)
@@ -69,6 +71,10 @@ target_link_libraries(bench_bitcoin
   bitcoin_node
   Boost::headers
 )
+
+if(WITH_EMBEDDED_ASMAP)
+  target_sources(bench_bitcoin PRIVATE asmap.cpp)
+endif()
 
 if(ENABLE_WALLET)
   target_sources(bench_bitcoin

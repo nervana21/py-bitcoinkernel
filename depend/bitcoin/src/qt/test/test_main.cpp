@@ -6,6 +6,7 @@
 
 #include <interfaces/init.h>
 #include <interfaces/node.h>
+#include <logging.h>
 #include <qt/bitcoin.h>
 #include <qt/guiconstants.h>
 #include <qt/test/apptests.h>
@@ -35,6 +36,7 @@ const std::function<std::string()> G_TEST_GET_FULL_NAME{};
 // This is all you need to run all the tests
 int main(int argc, char* argv[])
 {
+    BCLog::Logger logger;
     // Initialize persistent globals with the testing setup state for sanity.
     // E.g. -datadir in gArgs is set to a temp directory dummy value (instead
     // of defaulting to the default datadir), or globalChainParams is set to
@@ -60,12 +62,18 @@ int main(int argc, char* argv[])
     // Prefer the "minimal" platform for the test instead of the normal default
     // platform ("xcb", "windows", or "cocoa") so tests can't unintentionally
     // interfere with any background GUIs and don't require extra resources.
-    #if defined(WIN32)
-        if (getenv("QT_QPA_PLATFORM") == nullptr) _putenv_s("QT_QPA_PLATFORM", "minimal");
-    #else
-        setenv("QT_QPA_PLATFORM", "minimal", 0 /* overwrite */);
-    #endif
+#if defined(WIN32)
+    if (getenv("QT_QPA_PLATFORM") == nullptr) _putenv_s("QT_QPA_PLATFORM", "minimal");
+#else
+    setenv("QT_QPA_PLATFORM", "minimal", 0 /* overwrite */);
+#endif
 
+#ifdef Q_OS_MACOS
+    // QMacStyle assumes a Cocoa platform window, which the minimal platform
+    // does not provide. In particular, painting a QGroupBox can make Qt call
+    // addSubview: on an invalid native object (QTBUG-49686).
+    setenv("QT_STYLE_OVERRIDE", "fusion", 0 /* overwrite */);
+#endif
 
     QCoreApplication::setOrganizationName(QAPP_ORG_NAME);
     QCoreApplication::setApplicationName(QAPP_APP_NAME_DEFAULT "-test");

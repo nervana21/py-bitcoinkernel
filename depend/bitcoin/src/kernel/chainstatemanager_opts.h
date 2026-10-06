@@ -5,6 +5,7 @@
 #ifndef BITCOIN_KERNEL_CHAINSTATEMANAGER_OPTS_H
 #define BITCOIN_KERNEL_CHAINSTATEMANAGER_OPTS_H
 
+#include <kernel/mempool_interface.h>
 #include <kernel/notifications_interface.h>
 
 #include <arith_uint256.h>
@@ -21,7 +22,8 @@
 class CChainParams;
 class ValidationSignals;
 
-static constexpr auto DEFAULT_MAX_TIP_AGE{24h};
+inline constexpr auto DEFAULT_MAX_TIP_AGE{24h};
+inline constexpr int32_t DEFAULT_PREVOUTFETCH_THREADS{8};
 
 namespace kernel {
 
@@ -42,10 +44,13 @@ struct ChainstateManagerOpts {
     std::chrono::seconds max_tip_age{DEFAULT_MAX_TIP_AGE};
     DBOptions coins_db{};
     CoinsViewOptions coins_view{};
+    Mempool& mempool_interface;
     Notifications& notifications;
     ValidationSignals* signals{nullptr};
     //! Number of script check worker threads. Zero means no parallel verification.
     int worker_threads_num{0};
+    //! Number of worker threads used for prefetching block input prevouts. Zero means no parallel fetching.
+    int32_t prevoutfetch_threads_num{DEFAULT_PREVOUTFETCH_THREADS};
     size_t script_execution_cache_bytes{DEFAULT_SCRIPT_EXECUTION_CACHE_BYTES};
     size_t signature_cache_bytes{DEFAULT_SIGNATURE_CACHE_BYTES};
 };

@@ -31,21 +31,21 @@ BOOST_FIXTURE_TEST_CASE(chainstate_write_interval, TestingSetup)
     m_node.validation_signals->RegisterSharedValidationInterface(sub);
     auto& chainstate{Assert(m_node.chainman)->ActiveChainstate()};
     BlockValidationState state_dummy{};
-    NodeClockContext clock_ctx{};
+    FakeNodeClock clock{};
 
     // The first periodic flush sets m_next_write and does not flush
-    chainstate.FlushStateToDisk(state_dummy, FlushStateMode::PERIODIC);
+    BOOST_CHECK(chainstate.FlushStateToDisk(state_dummy, FlushStateMode::PERIODIC));
     m_node.validation_signals->SyncWithValidationInterfaceQueue();
     BOOST_CHECK(!sub->m_did_flush);
 
     // The periodic flush interval is between 50 and 70 minutes (inclusive)
-    clock_ctx += DATABASE_WRITE_INTERVAL_MIN - 1min;
-    chainstate.FlushStateToDisk(state_dummy, FlushStateMode::PERIODIC);
+    clock += DATABASE_WRITE_INTERVAL_MIN - 1min;
+    BOOST_CHECK(chainstate.FlushStateToDisk(state_dummy, FlushStateMode::PERIODIC));
     m_node.validation_signals->SyncWithValidationInterfaceQueue();
     BOOST_CHECK(!sub->m_did_flush);
 
-    clock_ctx += DATABASE_WRITE_INTERVAL_MAX;
-    chainstate.FlushStateToDisk(state_dummy, FlushStateMode::PERIODIC);
+    clock += DATABASE_WRITE_INTERVAL_MAX;
+    BOOST_CHECK(chainstate.FlushStateToDisk(state_dummy, FlushStateMode::PERIODIC));
     m_node.validation_signals->SyncWithValidationInterfaceQueue();
     BOOST_CHECK(sub->m_did_flush);
 }
@@ -76,31 +76,33 @@ BOOST_FIXTURE_TEST_CASE(write_during_multiblock_activation, TestChain100Setup)
     CBlockIndex* second_from_tip{tip->pprev};
 
     {
-        LOCK2(m_node.chainman->GetMutex(), chainstate.MempoolMutex());
-        chainstate.DisconnectTip(state_dummy, nullptr);
-        chainstate.DisconnectTip(state_dummy, nullptr);
+        LOCK(m_node.chainman->GetMutex());
+        BOOST_CHECK(chainstate.DisconnectTip(state_dummy));
+        BOOST_CHECK(chainstate.DisconnectTip(state_dummy));
     }
 
     BOOST_CHECK_EQUAL(second_from_tip->pprev, chainstate.m_chain.Tip());
 
     // Set m_next_write to current time
-    chainstate.FlushStateToDisk(state_dummy, FlushStateMode::FORCE_FLUSH);
+    BOOST_CHECK(chainstate.FlushStateToDisk(state_dummy, FlushStateMode::FORCE_FLUSH));
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainstate.GetLastFlushedBlock()), second_from_tip->pprev);
     m_node.validation_signals->SyncWithValidationInterfaceQueue();
     // The periodic flush interval is between 50 and 70 minutes (inclusive)
     // The next call to a PERIODIC write will flush
-    SetMockTime(GetMockTime() + DATABASE_WRITE_INTERVAL_MAX);
+    m_clock += DATABASE_WRITE_INTERVAL_MAX;
 
     const auto sub{std::make_shared<TestSubscriber>()};
     m_node.validation_signals->RegisterSharedValidationInterface(sub);
 
     // ActivateBestChain back to tip
-    chainstate.ActivateBestChain(state_dummy, nullptr);
+    BOOST_CHECK(chainstate.ActivateBestChain(state_dummy, nullptr));
     BOOST_CHECK_EQUAL(tip, chainstate.m_chain.Tip());
     // Check that we flushed inside ActivateBestChain while we were at the
     // second block from tip, since FlushStateToDisk is called with PERIODIC
     // inside the outer loop.
     m_node.validation_signals->SyncWithValidationInterfaceQueue();
     BOOST_CHECK_EQUAL(sub->m_flushed_at_block, second_from_tip);
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainstate.GetLastFlushedBlock()), second_from_tip);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

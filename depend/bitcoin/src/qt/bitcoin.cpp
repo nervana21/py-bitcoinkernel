@@ -6,7 +6,6 @@
 
 #include <qt/bitcoin.h>
 
-#include <btcsignals.h>
 #include <chainparams.h>
 #include <common/args.h>
 #include <common/init.h>
@@ -32,7 +31,9 @@
 #include <qt/utilitydialog.h>
 #include <qt/winshutdownmonitor.h>
 #include <uint256.h>
+#include <util/btcsignals.h>
 #include <util/exception.h>
+#include <util/log.h>
 #include <util/string.h>
 #include <util/threadnames.h>
 #include <util/translation.h>
@@ -479,15 +480,18 @@ static void SetupUIArgs(ArgsManager& argsman)
 
 int GuiMain(int argc, char* argv[])
 {
+    // Intentionally leaked! See BCLog::g_logger description for rationale.
+    new BCLog::Logger;
+
     std::unique_ptr<interfaces::Init> init = interfaces::MakeGuiInit(argc, argv);
 
     SetupEnvironment();
     util::ThreadSetInternalName("main");
 
     // Subscribe to global signals from core
-    btcsignals::scoped_connection handler_message_box = ::uiInterface.ThreadSafeMessageBox_connect(noui_ThreadSafeMessageBox);
-    btcsignals::scoped_connection handler_question = ::uiInterface.ThreadSafeQuestion_connect(noui_ThreadSafeQuestion);
-    btcsignals::scoped_connection handler_init_message = ::uiInterface.InitMessage_connect(noui_InitMessage);
+    btcsignals::scoped_connection handler_message_box{::uiInterface.ThreadSafeMessageBox.connect(noui_ThreadSafeMessageBox)};
+    btcsignals::scoped_connection handler_question{::uiInterface.ThreadSafeQuestion.connect(noui_ThreadSafeQuestion)};
+    btcsignals::scoped_connection handler_init_message{::uiInterface.InitMessage.connect(noui_InitMessage)};
 
     // Do not refer to data directory yet, this can be overridden by Intro::pickDataDirectory
 

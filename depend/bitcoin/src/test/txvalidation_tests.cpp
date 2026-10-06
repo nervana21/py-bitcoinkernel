@@ -4,6 +4,7 @@
 
 #include <consensus/validation.h>
 #include <key_io.h>
+#include <node/transaction.h>
 #include <policy/packages.h>
 #include <policy/policy.h>
 #include <policy/ephemeral_policy.h>
@@ -38,10 +39,9 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_reject_coinbase, TestChain100Setup)
 
     BOOST_CHECK(CTransaction(coinbaseTx).IsCoinBase());
 
-    LOCK(cs_main);
-
     unsigned int initialPoolSize = m_node.mempool->size();
-    const MempoolAcceptResult result = m_node.chainman->ProcessTransaction(MakeTransactionRef(coinbaseTx));
+    auto [result, flush_result]{node::ProcessTransaction(MakeTransactionRef(coinbaseTx), m_node)};
+    BOOST_CHECK(flush_result);
 
     BOOST_CHECK(result.m_result_type == MempoolAcceptResult::ResultType::INVALID);
 
@@ -114,7 +114,7 @@ static inline CTransactionRef make_ephemeral_tx(const std::vector<COutPoint>& in
 BOOST_FIXTURE_TEST_CASE(ephemeral_tests, RegTestingSetup)
 {
     CTxMemPool& pool = *Assert(m_node.mempool);
-    LOCK2(cs_main, pool.cs);
+    LOCK(pool.cs);
     TestMemPoolEntryHelper entry;
 
     TxValidationState child_state;

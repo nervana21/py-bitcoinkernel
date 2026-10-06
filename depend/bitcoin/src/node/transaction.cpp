@@ -3,6 +3,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <node/transaction.h>
+
 #include <consensus/validation.h>
 #include <index/txindex.h>
 #include <net.h>
@@ -10,12 +12,32 @@
 #include <node/blockstorage.h>
 #include <node/context.h>
 #include <node/types.h>
+#include <policy/feerate.h>
 #include <txmempool.h>
 #include <validation.h>
 #include <validationinterface.h>
-#include <node/transaction.h>
 
 namespace node {
+
+std::tuple<MempoolAcceptResult, kernel::FlushResult<void, kernel::AbortFailure>> ProcessTransaction(const CTransactionRef& tx, Chainstate& chainstate, CTxMemPool& mempool, bool test_accept)
+{
+    LOCK(cs_main);
+    auto [result, flush_result] = AcceptToMemoryPool(chainstate, tx, mempool, GetTime(), /*bypass_limits=*/ false, test_accept);
+    mempool.check(chainstate.CoinsTip(), chainstate.m_chain.Height() + 1);
+    return {std::move(result), std::move(flush_result)};
+}
+
+std::tuple<MempoolAcceptResult, kernel::FlushResult<void, kernel::AbortFailure>> ProcessTransaction(const CTransactionRef& tx, const NodeContext& node, bool test_accept)
+{
+    Chainstate& active_chainstate = node.chainman->ActiveChainstate();
+    if (!node.mempool) {
+        TxValidationState state;
+        state.Invalid(TxValidationResult::TX_NO_MEMPOOL, "no-mempool");
+        return {MempoolAcceptResult::Failure(state), kernel::FlushResult<void, kernel::AbortFailure>{}};
+    }
+    return ProcessTransaction(tx, active_chainstate, *node.mempool, test_accept);
+}
+
 static TransactionError HandleATMPError(const TxValidationState& state, std::string& err_string_out)
 {
     err_string_out = state.ToString();
@@ -29,12 +51,7 @@ static TransactionError HandleATMPError(const TxValidationState& state, std::str
     }
 }
 
-TransactionError BroadcastTransaction(NodeContext& node,
-                                      const CTransactionRef tx,
-                                      std::string& err_string,
-                                      const CAmount& max_tx_fee,
-                                      TxBroadcast broadcast_method,
-                                      bool wait_callback)
+TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef tx, std::string& err_string, const CAmount& max_tx_fee, const CFeeRate& max_tx_fee_rate, TxBroadcast broadcast_method, bool wait_callback)
 {
     // BroadcastTransaction can be called by RPC or by the wallet.
     // chainman, mempool and peerman are initialized before the RPC server and wallet are started
@@ -48,6 +65,7 @@ TransactionError BroadcastTransaction(NodeContext& node,
     bool callback_set = false;
 
     {
+        {
         LOCK(cs_main);
 
         // If the transaction is already confirmed in the chain, don't do anything
@@ -58,6 +76,7 @@ TransactionError BroadcastTransaction(NodeContext& node,
             // IsSpent doesn't mean the coin is spent, it means the output doesn't exist.
             // So if the output does exist, then this transaction exists in the chain.
             if (!existingCoin.IsSpent()) return TransactionError::ALREADY_IN_UTXO_SET;
+        }
         }
 
         if (auto mempool_tx = node.mempool->get(txid); mempool_tx) {
@@ -72,14 +91,17 @@ TransactionError BroadcastTransaction(NodeContext& node,
         } else {
             // Transaction is not already in the mempool.
             const bool check_max_fee{max_tx_fee > 0};
-            if (check_max_fee || broadcast_method == TxBroadcast::NO_MEMPOOL_PRIVATE_BROADCAST) {
+            const bool check_max_feerate{max_tx_fee_rate > CFeeRate(0)};
+            if (check_max_fee || check_max_feerate || broadcast_method == TxBroadcast::NO_MEMPOOL_PRIVATE_BROADCAST) {
                 // First, call ATMP with test_accept and check the fee. If ATMP
                 // fails here, return error immediately.
-                const MempoolAcceptResult result = node.chainman->ProcessTransaction(tx, /*test_accept=*/ true);
+                auto [result, flush_result]{ProcessTransaction(tx, node, /*test_accept=*/ true)};
                 if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
                     return HandleATMPError(result.m_state, err_string);
                 } else if (check_max_fee && result.m_base_fees.value() > max_tx_fee) {
                     return TransactionError::MAX_FEE_EXCEEDED;
+                } else if (check_max_feerate && result.m_base_fees.value() > max_tx_fee_rate.GetFee(result.m_vsize.value())) {
+                    return TransactionError::MAX_FEE_RATE_EXCEEDED;
                 }
             }
 
@@ -88,8 +110,7 @@ TransactionError BroadcastTransaction(NodeContext& node,
             case TxBroadcast::MEMPOOL_AND_BROADCAST_TO_ALL:
                 // Try to submit the transaction to the mempool.
                 {
-                    const MempoolAcceptResult result =
-                        node.chainman->ProcessTransaction(tx, /*test_accept=*/false);
+                    auto [result, flush_result] = ProcessTransaction(tx, node, /*test_accept=*/false);
                     if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
                         return HandleATMPError(result.m_state, err_string);
                     }
@@ -130,11 +151,10 @@ TransactionError BroadcastTransaction(NodeContext& node,
     case TxBroadcast::MEMPOOL_NO_BROADCAST:
         break;
     case TxBroadcast::MEMPOOL_AND_BROADCAST_TO_ALL:
-        node.peerman->InitiateTxBroadcastToAll(txid, wtxid);
+        node.peerman->InitiateTxBroadcastToAll(wtxid);
         break;
     case TxBroadcast::NO_MEMPOOL_PRIVATE_BROADCAST:
-        node.peerman->InitiateTxBroadcastPrivate(tx);
-        break;
+        return node.peerman->InitiateTxBroadcastPrivate(tx);
     }
 
     return TransactionError::OK;
@@ -147,15 +167,13 @@ CTransactionRef GetTransaction(const CBlockIndex* const block_index, const CTxMe
         if (ptx) return ptx;
     }
     if (g_txindex) {
-        CTransactionRef tx;
-        uint256 block_hash;
-        if (g_txindex->FindTx(hash, block_hash, tx)) {
-            if (!block_index || block_index->GetBlockHash() == block_hash) {
+        if (auto result{g_txindex->FindTx(hash)}) {
+            if (!block_index || block_index->GetBlockHash() == result->block_hash) {
                 // Don't return the transaction if the provided block hash doesn't match.
                 // The case where a transaction appears in multiple blocks (e.g. reorgs or
                 // BIP30) is handled by the block lookup below.
-                hashBlock = block_hash;
-                return tx;
+                hashBlock = result->block_hash;
+                return result->tx;
             }
         }
     }

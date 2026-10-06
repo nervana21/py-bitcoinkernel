@@ -4,9 +4,10 @@
 
 #include <bench/bench.h>
 #include <consensus/amount.h>
+#include <consensus/validation.h>
 #include <kernel/cs_main.h>
 #include <policy/ephemeral_policy.h>
-#include <policy/policy.h>
+#include <policy/feerate.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <sync.h>
@@ -15,6 +16,7 @@
 #include <txmempool.h>
 #include <util/check.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -22,7 +24,7 @@
 
 static void AddTx(const CTransactionRef& tx, CTxMemPool& pool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, pool.cs)
 {
-    int64_t nTime{0};
+    MempoolTime nTime{};
     unsigned int nHeight{1};
     uint64_t sequence{0};
     bool spendsCoinbase{false};
@@ -48,9 +50,8 @@ static void MempoolCheckEphemeralSpends(benchmark::Bench& bench)
     tx1.vin.resize(1);
     tx1.vout.resize(number_outputs);
     for (size_t i = 0; i < tx1.vout.size(); i++) {
-        tx1.vout[i].scriptPubKey = CScript();
         // Each output progressively larger
-        tx1.vout[i].nValue = i * CENT;
+        tx1.vout[i] = CTxOut{CAmount(i) * CENT, CScript()};
     }
 
     const auto& parent_txid = tx1.GetHash();
@@ -58,9 +59,8 @@ static void MempoolCheckEphemeralSpends(benchmark::Bench& bench)
     // Spends all outputs of tx1, other details don't matter
     CMutableTransaction tx2;
     tx2.vin.resize(tx1.vout.size());
-    for (size_t i = 0; i < tx2.vin.size(); i++) {
-        tx2.vin[i].prevout.hash = parent_txid;
-        tx2.vin[i].prevout.n = i;
+    for (uint32_t i{0}; i < tx2.vin.size(); ++i) {
+        tx2.vin[i].prevout = COutPoint{parent_txid, i};
     }
     tx2.vout.resize(1);
 
