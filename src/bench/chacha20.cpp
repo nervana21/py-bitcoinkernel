@@ -2,15 +2,14 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-
 #include <bench/bench.h>
 #include <crypto/chacha20.h>
 #include <crypto/chacha20poly1305.h>
-#include <span.h>
 #include <util/byte_units.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 /* Number of bytes to process per iteration */

@@ -10,25 +10,26 @@
 #include <crypto/sha256.h>
 #include <cuckoocache.h>
 #include <script/interpreter.h>
-#include <span.h>
 #include <uint256.h>
 #include <util/byte_units.h>
 #include <util/hasher.h>
-
 #include <cstddef>
-#include <shared_mutex>
+#include <span>
 #include <vector>
 
 class CPubKey;
 class CTransaction;
 class XOnlyPubKey;
+namespace util::log {
+class Logger;
+} // namespace util::log
 
 // DoS prevention: limit cache size to 32MiB (over 1000000 entries on 64-bit
 // systems). Due to how we count cache size, actual memory usage is slightly
 // more (~32.25 MiB)
-static constexpr size_t DEFAULT_VALIDATION_CACHE_BYTES{32_MiB};
-static constexpr size_t DEFAULT_SIGNATURE_CACHE_BYTES{DEFAULT_VALIDATION_CACHE_BYTES / 2};
-static constexpr size_t DEFAULT_SCRIPT_EXECUTION_CACHE_BYTES{DEFAULT_VALIDATION_CACHE_BYTES / 2};
+inline constexpr size_t DEFAULT_VALIDATION_CACHE_BYTES{32_MiB};
+inline constexpr size_t DEFAULT_SIGNATURE_CACHE_BYTES{DEFAULT_VALIDATION_CACHE_BYTES / 2};
+inline constexpr size_t DEFAULT_SCRIPT_EXECUTION_CACHE_BYTES{DEFAULT_VALIDATION_CACHE_BYTES / 2};
 static_assert(DEFAULT_VALIDATION_CACHE_BYTES == DEFAULT_SIGNATURE_CACHE_BYTES + DEFAULT_SCRIPT_EXECUTION_CACHE_BYTES);
 
 /**
@@ -44,10 +45,9 @@ private:
     CSHA256 m_salted_hasher_schnorr;
     typedef CuckooCache::cache<uint256, SignatureCacheHasher> map_type;
     map_type setValid;
-    std::shared_mutex cs_sigcache;
 
 public:
-    SignatureCache(size_t max_size_bytes);
+    SignatureCache(util::log::Logger& logger, size_t max_size_bytes);
 
     SignatureCache(const SignatureCache&) = delete;
     SignatureCache& operator=(const SignatureCache&) = delete;

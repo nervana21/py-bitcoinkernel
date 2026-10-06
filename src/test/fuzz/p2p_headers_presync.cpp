@@ -8,7 +8,6 @@
 #include <net_processing.h>
 #include <netmessagemaker.h>
 #include <node/peerman_args.h>
-#include <pow.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
@@ -143,13 +142,6 @@ CBlock ConsumeBlock(FuzzedDataProvider& fuzzed_data_provider, const uint256& pre
     return block;
 }
 
-void FinalizeHeader(CBlockHeader& header, const ChainstateManager& chainman)
-{
-    while (!CheckProofOfWork(header.GetHash(), header.nBits, chainman.GetParams().GetConsensus())) {
-        ++(header.nNonce);
-    }
-}
-
 // Global setup works for this test as state modification (specifically in the
 // block index) would indicate a bug.
 HeadersSyncSetup* g_testing_setup;
@@ -172,24 +164,23 @@ FUZZ_TARGET(p2p_headers_presync, .init = initialize)
     FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
     // The steady clock is currently only used for logging, so a constant
     // time-point seems acceptable for now.
-    SteadyClockContext steady_ctx{};
+    FakeSteadyClock steady_ctx{};
 
     ChainstateManager& chainman = *g_testing_setup->m_node.chainman;
     CBlockHeader base{chainman.GetParams().GenesisBlock()};
-    const NodeClockContext clock_ctx{base.Time()};
+    const FakeNodeClock clock{base.Time()};
 
     LOCK(NetEventsInterface::g_msgproc_mutex);
 
     g_testing_setup->ResetAndInitialize();
 
     // The chain is just a single block, so this is equal to 1
-    size_t original_index_size{WITH_LOCK(cs_main, return chainman.m_blockman.m_block_index.size())};
-    arith_uint256 total_work{WITH_LOCK(cs_main, return chainman.m_best_header->nChainWork)};
+    size_t original_index_size{WITH_LOCK(chainman.m_blockman.m_index_mutex, return chainman.m_blockman.m_block_index.size())};
+    arith_uint256 total_work{WITH_LOCK(chainman.m_blockman.m_index_mutex, return chainman.m_blockman.m_best_header->nChainWork)};
 
     std::vector<CBlockHeader> all_headers;
 
-    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 100)
-    {
+    LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 100) {
         auto finalized_block = [&]() {
             CBlock block = ConsumeBlock(fuzzed_data_provider, base.GetHash(), base.nBits);
             FinalizeHeader(block, chainman);
@@ -246,5 +237,5 @@ FUZZ_TARGET(p2p_headers_presync, .init = initialize)
     // The headers/blocks sent in this test should never be stored, as the chains don't have the work required
     // to meet the anti-DoS work threshold. So, if at any point the block index grew in size, then there's a bug
     // in the headers pre-sync logic.
-    assert(WITH_LOCK(cs_main, return chainman.m_blockman.m_block_index.size()) == original_index_size);
+    assert(WITH_LOCK(chainman.m_blockman.m_index_mutex, return chainman.m_blockman.m_block_index.size()) == original_index_size);
 }

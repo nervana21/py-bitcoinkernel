@@ -34,15 +34,13 @@ BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)
     const BlockManager::Options blockman_opts{
         .chainparams = *params,
         .blocks_dir = m_args.GetBlocksDirPath(),
+        .block_tree_dir = m_args.GetDataDirNet() / "blocks" / "index",
         .notifications = notifications,
-        .block_tree_db_params = DBParams{
-            .path = m_args.GetDataDirNet() / "blocks" / "index",
-            .cache_bytes = 0,
-        },
     };
-    BlockManager blockman{*Assert(m_node.shutdown_signal), blockman_opts};
+    BlockManager blockman{m_logger, *Assert(m_node.shutdown_signal), blockman_opts};
     // simulate adding a genesis block normally
-    BOOST_CHECK_EQUAL(blockman.WriteBlock(params->GenesisBlock(), 0).nPos, STORAGE_HEADER_BYTES);
+    LOCK(::cs_main);
+    BOOST_CHECK_EQUAL(Assert(blockman.WriteBlock(params->GenesisBlock(), 0))->nPos, STORAGE_HEADER_BYTES);
     // simulate what happens during reindex
     // simulate a well-formed genesis block being found at offset 8 in the blk00000.dat file
     // the block is found at offset 8 because there is an 8 byte serialization header
@@ -55,7 +53,7 @@ BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)
     // this is a check to make sure that https://github.com/bitcoin/bitcoin/issues/21379 does not recur
     // 8 bytes (for serialization header) + 285 (for serialized genesis block) = 293
     // add another 8 bytes for the second block's serialization header and we get 293 + 8 = 301
-    FlatFilePos actual{blockman.WriteBlock(params->GenesisBlock(), 1)};
+    FlatFilePos actual{*Assert(blockman.WriteBlock(params->GenesisBlock(), 1))};
     BOOST_CHECK_EQUAL(actual.nPos, STORAGE_HEADER_BYTES + ::GetSerializeSize(TX_WITH_WITNESS(params->GenesisBlock())) + STORAGE_HEADER_BYTES);
 }
 
@@ -237,13 +235,10 @@ BOOST_AUTO_TEST_CASE(blockmanager_flush_block_file)
     node::BlockManager::Options blockman_opts{
         .chainparams = Params(),
         .blocks_dir = m_args.GetBlocksDirPath(),
+        .block_tree_dir = m_args.GetDataDirNet() / "blocks" / "index",
         .notifications = notifications,
-        .block_tree_db_params = DBParams{
-            .path = m_args.GetDataDirNet() / "blocks" / "index",
-            .cache_bytes = 0,
-        },
     };
-    BlockManager blockman{*Assert(m_node.shutdown_signal), blockman_opts};
+    BlockManager blockman{m_logger, *Assert(m_node.shutdown_signal), blockman_opts};
 
     // Test blocks with no transactions, not even a coinbase
     CBlock block1;
@@ -257,13 +252,14 @@ BOOST_AUTO_TEST_CASE(blockmanager_flush_block_file)
     constexpr int TEST_BLOCK_SIZE{81};
 
     // Blockstore is empty
+    LOCK(::cs_main);
     BOOST_CHECK_EQUAL(blockman.CalculateCurrentUsage(), 0);
 
     // Write the first block to a new location.
-    FlatFilePos pos1{blockman.WriteBlock(block1, /*nHeight=*/1)};
+    FlatFilePos pos1{*Assert(blockman.WriteBlock(block1, /*nHeight=*/1))};
 
     // Write second block
-    FlatFilePos pos2{blockman.WriteBlock(block2, /*nHeight=*/2)};
+    FlatFilePos pos2{*Assert(blockman.WriteBlock(block2, /*nHeight=*/2))};
 
     // Two blocks in the file
     BOOST_CHECK_EQUAL(blockman.CalculateCurrentUsage(), (TEST_BLOCK_SIZE + STORAGE_HEADER_BYTES) * 2);
@@ -320,6 +316,26 @@ BOOST_FIXTURE_TEST_CASE(prune_lock_update_and_delete, TestingSetup)
 
     // Deleting a non-existent lock returns false
     BOOST_CHECK(!blockman.DeletePruneLock("nonexistent"));
+}
+
+BOOST_AUTO_TEST_CASE(raise_validity_compare_exchange)
+{
+    CBlockIndex index;
+    BOOST_CHECK(index.RaiseValidity(BLOCK_VALID_TREE));
+    BOOST_CHECK(!index.RaiseValidity(BLOCK_VALID_TREE));
+    BOOST_CHECK(index.IsValid(BLOCK_VALID_TREE));
+
+    index.nStatus |= BLOCK_HAVE_DATA;
+    BOOST_CHECK(index.RaiseValidity(BLOCK_VALID_TRANSACTIONS));
+    BOOST_CHECK(index.nStatus & BLOCK_HAVE_DATA);
+    BOOST_CHECK(index.IsValid(BLOCK_VALID_TRANSACTIONS));
+    BOOST_CHECK(!index.RaiseValidity(BLOCK_VALID_TREE));
+
+    index.nStatus |= BLOCK_FAILED_VALID;
+    BOOST_CHECK(!index.IsValid(BLOCK_VALID_TRANSACTIONS));
+    BOOST_CHECK(!index.RaiseValidity(BLOCK_VALID_SCRIPTS));
+    BOOST_CHECK(index.nStatus & BLOCK_HAVE_DATA);
+    BOOST_CHECK(index.nStatus & BLOCK_FAILED_VALID);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

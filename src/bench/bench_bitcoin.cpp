@@ -3,19 +3,20 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <bench/bench.h>
-#include <common/args.h>
 #include <crypto/sha256.h>
+#include <logging.h>
+#include <test/util/setup_common.h>
 #include <tinyformat.h>
 #include <util/fs.h>
-#include <util/string.h>
-#include <test/util/setup_common.h>
+#include <util/time.h>
 
-#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <sstream>
+#include <string>
 #include <vector>
 
 static const char* DEFAULT_BENCH_FILTER = ".*";
@@ -62,6 +63,7 @@ static std::vector<std::string> parseTestSetupArgs(const ArgsManager& argsman)
 
 int main(int argc, char** argv)
 {
+    BCLog::Logger logger;
     ArgsManager argsman;
     SetupBenchArgs(argsman);
     SHA256AutoDetect();

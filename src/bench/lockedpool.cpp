@@ -4,10 +4,10 @@
 
 #include <bench/bench.h>
 #include <support/lockedpool.h>
+#include <util/byte_units.h>
 
 #include <cstddef>
 #include <cstdint>
-#include <util/byte_units.h>
 #include <vector>
 
 #define ASIZE 2048

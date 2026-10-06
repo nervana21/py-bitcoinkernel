@@ -2,10 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <test/data/script_tests.json.h>
-#include <test/data/bip341_wallet_vectors.json.h>
-
 #include <common/system.h>
+#include <compressor.h>
 #include <core_io.h>
 #include <key.h>
 #include <rpc/util.h>
@@ -16,24 +14,26 @@
 #include <script/sign.h>
 #include <script/signingprovider.h>
 #include <script/solver.h>
+#include <secp256k1.h>
 #include <streams.h>
+#include <test/data/bip341_wallet_vectors.json.h>
+#include <test/data/script_tests.json.h>
+#include <test/util/common.h>
 #include <test/util/json.h>
 #include <test/util/random.h>
-#include <test/util/common.h>
 #include <test/util/setup_common.h>
 #include <test/util/transaction_utils.h>
+#include <univalue.h>
+#include <util/check.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
 #include <util/string.h>
 
+#include <boost/test/unit_test.hpp>
+
 #include <cstdint>
 #include <string>
 #include <vector>
-
-#include <boost/test/unit_test.hpp>
-
-#include <secp256k1.h>
-#include <univalue.h>
 
 // Uncomment if you want to output updated JSON tests.
 // #define UPDATE_JSON_TESTS
@@ -92,6 +92,7 @@ static ScriptErrorDesc script_errors[]={
     {SCRIPT_ERR_WITNESS_UNEXPECTED, "WITNESS_UNEXPECTED"},
     {SCRIPT_ERR_WITNESS_PUBKEYTYPE, "WITNESS_PUBKEYTYPE"},
     {SCRIPT_ERR_TAPSCRIPT_EMPTY_PUBKEY, "TAPSCRIPT_EMPTY_PUBKEY"},
+    {SCRIPT_ERR_TAPSCRIPT_MINIMALIF, "TAPSCRIPT_MINIMALIF"},
     {SCRIPT_ERR_OP_CODESEPARATOR, "OP_CODESEPARATOR"},
     {SCRIPT_ERR_SIG_FINDANDDELETE, "SIG_FINDANDDELETE"},
     {SCRIPT_ERR_SCRIPTNUM, "SCRIPTNUM"}
@@ -1265,7 +1266,7 @@ SignatureData CombineSignatures(const CTxOut& txout, const CMutableTransaction& 
     SignatureData data;
     data.MergeSignatureData(scriptSig1);
     data.MergeSignatureData(scriptSig2);
-    ProduceSignature(DUMMY_SIGNING_PROVIDER, MutableTransactionSignatureCreator(tx, 0, txout.nValue, SIGHASH_DEFAULT), txout.scriptPubKey, data);
+    ProduceSignature(DUMMY_SIGNING_PROVIDER, MutableTransactionSignatureCreator(tx, 0, txout.nValue, {.sighash_type = SIGHASH_DEFAULT}), txout.scriptPubKey, data);
     return data;
 }
 
@@ -1633,7 +1634,7 @@ BOOST_AUTO_TEST_CASE(script_HasValidOps)
 BOOST_AUTO_TEST_CASE(bip341_keypath_test_vectors)
 {
     UniValue tests;
-    tests.read(json_tests::bip341_wallet_vectors);
+    Assert(tests.read(json_tests::bip341_wallet_vectors));
 
     const auto& vectors = tests["keyPathSpending"];
 
@@ -1681,7 +1682,7 @@ BOOST_AUTO_TEST_CASE(bip341_keypath_test_vectors)
             // Sign and verify signature.
             FlatSigningProvider provider;
             provider.keys[key.GetPubKey().GetID()] = key;
-            MutableTransactionSignatureCreator creator(tx, txinpos, utxos[txinpos].nValue, &txdata, hashtype);
+            MutableTransactionSignatureCreator creator(tx, txinpos, utxos[txinpos].nValue, &txdata, {.sighash_type = hashtype});
             std::vector<unsigned char> signature;
             BOOST_CHECK(creator.CreateSchnorrSig(provider, signature, pubkey, nullptr, &merkle_root, SigVersion::TAPROOT));
             BOOST_CHECK_EQUAL(HexStr(signature), input["expected"]["witness"][0].get_str());

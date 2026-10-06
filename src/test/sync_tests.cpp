@@ -4,6 +4,7 @@
 
 #include <sync.h>
 #include <test/util/common.h>
+#include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -18,19 +19,14 @@ void TestPotentialDeadLockDetected(MutexType& mutex1, MutexType& mutex2)
         LOCK2(mutex1, mutex2);
     }
     BOOST_CHECK(LockStackEmpty());
-    bool error_thrown = false;
-    try {
+    {
+#ifdef DEBUG_LOCKORDER
+        BOOST_CHECK_EXCEPTION(LOCK2(mutex2, mutex1), std::logic_error, HasReason{"potential deadlock detected: mutex1 -> mutex2 -> mutex1"});
+#else
         LOCK2(mutex2, mutex1);
-    } catch (const std::logic_error& e) {
-        BOOST_CHECK_EQUAL(e.what(), "potential deadlock detected: mutex1 -> mutex2 -> mutex1");
-        error_thrown = true;
+#endif
     }
     BOOST_CHECK(LockStackEmpty());
-    #ifdef DEBUG_LOCKORDER
-    BOOST_CHECK(error_thrown);
-    #else
-    BOOST_CHECK(!error_thrown);
-    #endif
 }
 
 #ifdef DEBUG_LOCKORDER
@@ -76,7 +72,7 @@ void TestInconsistentLockOrderDetected(MutexType& mutex1, MutexType& mutex2)
 }
 } // namespace
 
-BOOST_AUTO_TEST_SUITE(sync_tests)
+BOOST_FIXTURE_TEST_SUITE(sync_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(potential_deadlock_detected)
 {

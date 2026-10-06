@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-export LC_ALL=C
+export LC_ALL=C.UTF-8
 set -Eeuo pipefail
 
 # Declare paths to libraries
@@ -9,8 +9,10 @@ LIBS[cli]="libbitcoin_cli.a"
 LIBS[common]="libbitcoin_common.a"
 LIBS[consensus]="libbitcoin_consensus.a"
 LIBS[crypto]="libbitcoin_crypto.a"
+LIBS[kernel]="libbitcoin_kernel.a"
 LIBS[node]="libbitcoin_node.a"
 LIBS[util]="libbitcoin_util.a"
+LIBS[util_kernel]="libbitcoin_util_kernel.a"
 LIBS[wallet]="libbitcoin_wallet.a"
 
 # Declare allowed dependencies "X Y" where X is allowed to depend on Y. This
@@ -21,15 +23,25 @@ ALLOWED_DEPENDENCIES=(
     "common consensus"
     "common crypto"
     "common util"
+    "common kernel"
+    "common util_kernel"
     "consensus crypto"
+    "kernel util_kernel"
+    "kernel consensus"
+    "kernel crypto"
+    "util_kernel crypto"
     "node common"
     "node consensus"
     "node crypto"
     "node kernel"
+    "node util_kernel"
     "node util"
     "util crypto"
+    "util util_kernel"
     "wallet common"
     "wallet crypto"
+    "wallet kernel"
+    "wallet util_kernel"
     "wallet util"
 )
 

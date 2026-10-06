@@ -8,6 +8,7 @@
 #include <kernel/bitcoinkernel.h>
 
 #include <array>
+#include <chrono>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -33,14 +34,52 @@ enum class LogCategory : btck_LogCategory {
     RAND = btck_LogCategory_RAND,
     REINDEX = btck_LogCategory_REINDEX,
     VALIDATION = btck_LogCategory_VALIDATION,
-    KERNEL = btck_LogCategory_KERNEL
+    KERNEL = btck_LogCategory_KERNEL,
+    TXPACKAGES = btck_LogCategory_TXPACKAGES,
+    LOCK = btck_LogCategory_LOCK,
+    UNKNOWN = btck_LogCategory_UNKNOWN,
 };
 
 enum class LogLevel : btck_LogLevel {
     TRACE_LEVEL = btck_LogLevel_TRACE,
     DEBUG_LEVEL = btck_LogLevel_DEBUG,
-    INFO_LEVEL = btck_LogLevel_INFO
+    INFO_LEVEL = btck_LogLevel_INFO,
+    WARNING_LEVEL = btck_LogLevel_WARNING,
+    ERROR_LEVEL = btck_LogLevel_ERROR,
 };
+
+constexpr std::string_view Name(LogLevel level) noexcept
+{
+    switch (level) {
+    case LogLevel::TRACE_LEVEL: return "trace";
+    case LogLevel::DEBUG_LEVEL: return "debug";
+    case LogLevel::INFO_LEVEL: return "info";
+    case LogLevel::WARNING_LEVEL: return "warning";
+    case LogLevel::ERROR_LEVEL: return "error";
+    } // no default case, so the compiler can warn about missing cases
+    return "unknown";
+}
+
+constexpr std::string_view Name(LogCategory category) noexcept
+{
+    switch (category) {
+    case LogCategory::ALL: return "all";
+    case LogCategory::BENCH: return "bench";
+    case LogCategory::BLOCKSTORAGE: return "blockstorage";
+    case LogCategory::COINDB: return "coindb";
+    case LogCategory::LEVELDB: return "leveldb";
+    case LogCategory::MEMPOOL: return "mempool";
+    case LogCategory::PRUNE: return "prune";
+    case LogCategory::RAND: return "rand";
+    case LogCategory::REINDEX: return "reindex";
+    case LogCategory::TXPACKAGES: return "txpackages";
+    case LogCategory::VALIDATION: return "validation";
+    case LogCategory::KERNEL: return "kernel";
+    case LogCategory::LOCK: return "lock";
+    case LogCategory::UNKNOWN: return "unknown";
+    } // no default case, so the compiler can warn about missing cases
+    return "unknown";
+}
 
 enum class ChainType : btck_ChainType {
     MAINNET = btck_ChainType_MAINNET,
@@ -79,6 +118,22 @@ enum class BlockValidationResult : btck_BlockValidationResult {
     HEADER_LOW_WORK = btck_BlockValidationResult_HEADER_LOW_WORK
 };
 
+enum class TxValidationResult : btck_TxValidationResult {
+    UNSET               = btck_TxValidationResult_UNSET,
+    CONSENSUS           = btck_TxValidationResult_CONSENSUS,
+    INPUTS_NOT_STANDARD = btck_TxValidationResult_INPUTS_NOT_STANDARD,
+    NOT_STANDARD        = btck_TxValidationResult_NOT_STANDARD,
+    MISSING_INPUTS      = btck_TxValidationResult_MISSING_INPUTS,
+    PREMATURE_SPEND     = btck_TxValidationResult_PREMATURE_SPEND,
+    WITNESS_MUTATED     = btck_TxValidationResult_WITNESS_MUTATED,
+    WITNESS_STRIPPED    = btck_TxValidationResult_WITNESS_STRIPPED,
+    CONFLICT            = btck_TxValidationResult_CONFLICT,
+    MEMPOOL_POLICY      = btck_TxValidationResult_MEMPOOL_POLICY,
+    NO_MEMPOOL          = btck_TxValidationResult_NO_MEMPOOL,
+    RECONSIDERABLE      = btck_TxValidationResult_RECONSIDERABLE,
+    UNKNOWN             = btck_TxValidationResult_UNKNOWN
+};
+
 enum class ScriptVerifyStatus : btck_ScriptVerifyStatus {
     OK = btck_ScriptVerifyStatus_OK,
     ERROR_INVALID_FLAGS_COMBINATION = btck_ScriptVerifyStatus_ERROR_INVALID_FLAGS_COMBINATION,
@@ -102,6 +157,19 @@ enum class BlockCheckFlags : btck_BlockCheckFlags {
     POW = btck_BlockCheckFlags_POW,
     MERKLE = btck_BlockCheckFlags_MERKLE,
     ALL = btck_BlockCheckFlags_ALL
+};
+
+enum class ScriptTraceFrameKind : btck_ScriptTraceFrameKind {
+    BEGIN = btck_ScriptTraceFrameKind_BEGIN,
+    STEP = btck_ScriptTraceFrameKind_STEP,
+    END = btck_ScriptTraceFrameKind_END,
+};
+
+enum class SigVersion : btck_SigVersion {
+    BASE = btck_SigVersion_BASE,
+    WITNESS_V0 = btck_SigVersion_WITNESS_V0,
+    TAPROOT = btck_SigVersion_TAPROOT,
+    TAPSCRIPT = btck_SigVersion_TAPSCRIPT,
 };
 
 template <typename T>
@@ -173,7 +241,7 @@ T check(T ptr)
     return ptr;
 }
 
-template <typename Collection, typename ValueType>
+template <typename Collection, typename ValueType, auto GetFunc>
 class Iterator
 {
 public:
@@ -192,8 +260,7 @@ public:
     Iterator(const Collection* ptr, size_t idx) : m_collection{ptr}, m_idx{idx} {}
 
     // This is just a view, so return a copy.
-    auto operator*() const { return (*m_collection)[m_idx]; }
-    auto operator->() const { return (*m_collection)[m_idx]; }
+    auto operator*() const { return std::invoke(GetFunc, *m_collection, m_idx); }
 
     auto& operator++() { m_idx++; return *this; }
     auto operator++(int) { Iterator tmp = *this; ++(*this); return tmp; }
@@ -209,7 +276,7 @@ public:
 
     auto operator-(const Iterator& other) const { return static_cast<difference_type>(m_idx) - static_cast<difference_type>(other.m_idx); }
 
-    ValueType operator[](difference_type n) const { return (*m_collection)[m_idx + n]; }
+    ValueType operator[](difference_type n) const { return *(*this + n); }
 
     auto operator<=>(const Iterator& other) const { return m_idx <=> other.m_idx; }
 
@@ -232,7 +299,7 @@ class Range
 public:
     using value_type = std::invoke_result_t<decltype(GetFunc), const Container&, size_t>;
     using difference_type = std::ptrdiff_t;
-    using iterator = Iterator<Range, value_type>;
+    using iterator = Iterator<Container, value_type, GetFunc>;
     using const_iterator = iterator;
 
 private:
@@ -244,8 +311,8 @@ public:
         static_assert(std::ranges::random_access_range<Range>);
     }
 
-    iterator begin() const { return iterator(this, 0); }
-    iterator end() const { return iterator(this, size()); }
+    iterator begin() const { return iterator(m_container, 0); }
+    iterator end() const { return iterator(m_container, size()); }
 
     const_iterator cbegin() const { return begin(); }
     const_iterator cend() const { return end(); }
@@ -512,6 +579,50 @@ public:
 };
 
 template <typename Derived>
+class WtxidApi
+{
+private:
+    auto impl() const
+    {
+        return static_cast<const Derived*>(this)->get();
+    }
+
+    friend Derived;
+    WtxidApi() = default;
+
+public:
+    bool operator==(const WtxidApi& other) const
+    {
+        return btck_wtxid_equals(impl(), other.impl()) != 0;
+    }
+
+    bool operator!=(const WtxidApi& other) const
+    {
+        return btck_wtxid_equals(impl(), other.impl()) == 0;
+    }
+
+    std::array<std::byte, 32> ToBytes() const
+    {
+        std::array<std::byte, 32> hash;
+        btck_wtxid_to_bytes(impl(), reinterpret_cast<unsigned char*>(hash.data()));
+        return hash;
+    }
+};
+
+class WtxidView : public View<btck_Wtxid>, public WtxidApi<WtxidView>
+{
+public:
+    explicit WtxidView(const btck_Wtxid* ptr) : View{ptr} {}
+};
+
+class Wtxid : public Handle<btck_Wtxid, btck_wtxid_copy, btck_wtxid_destroy>, public WtxidApi<Wtxid>
+{
+public:
+    Wtxid(const WtxidView& view)
+        : Handle(view) {}
+};
+
+template <typename Derived>
 class OutPointApi
 {
 private:
@@ -533,6 +644,12 @@ public:
     {
         return TxidView{btck_transaction_out_point_get_txid(impl())};
     }
+
+    template <typename Other>
+    bool operator==(const OutPointApi<Other>& other) const
+    {
+        return btck_transaction_out_point_equals(impl(), static_cast<const Other&>(other).get()) != 0;
+    }
 };
 
 class OutPointView : public View<btck_TransactionOutPoint>, public OutPointApi<OutPointView>
@@ -545,6 +662,54 @@ class OutPoint : public Handle<btck_TransactionOutPoint, btck_transaction_out_po
 {
 public:
     OutPoint(const OutPointView& view)
+        : Handle(view) {}
+
+    OutPoint(const TxidView& txid, uint32_t index)
+        : Handle{btck_transaction_out_point_create(txid.get(), index)}
+    {
+    }
+};
+
+template <typename Derived>
+class WitnessStackApi
+{
+private:
+    auto impl() const
+    {
+        return static_cast<const Derived*>(this)->get();
+    }
+
+    friend Derived;
+    WitnessStackApi() = default;
+
+public:
+    size_t CountItems() const
+    {
+        return btck_witness_stack_count_items(impl());
+    }
+
+    std::vector<std::byte> GetItem(size_t index) const
+    {
+        struct Item { const btck_WitnessStack* stack; size_t index; };
+        Item item{impl(), index};
+        return write_bytes(&item, +[](const Item* c, btck_WriteBytes w, void* ud) {
+            return btck_witness_stack_get_item_at(c->stack, c->index, w, ud);
+        });
+    }
+
+    MAKE_RANGE_METHOD(Items, Derived, &WitnessStackApi<Derived>::CountItems, &WitnessStackApi<Derived>::GetItem, *static_cast<const Derived*>(this))
+};
+
+class WitnessStackView : public View<btck_WitnessStack>, public WitnessStackApi<WitnessStackView>
+{
+public:
+    explicit WitnessStackView(const btck_WitnessStack* ptr) : View{ptr} {}
+};
+
+class WitnessStack : public Handle<btck_WitnessStack, btck_witness_stack_copy, btck_witness_stack_destroy>, public WitnessStackApi<WitnessStack>
+{
+public:
+    WitnessStack(const WitnessStackView& view)
         : Handle(view) {}
 };
 
@@ -569,6 +734,16 @@ public:
     uint32_t GetSequence() const
     {
         return btck_transaction_input_get_sequence(impl());
+    }
+
+    WitnessStackView GetWitnessStack() const
+    {
+        return WitnessStackView{btck_transaction_input_get_witness_stack(impl())};
+    }
+
+    std::vector<std::byte> GetScriptSig() const
+    {
+        return write_bytes(impl(), btck_transaction_input_get_script_sig);
     }
 };
 
@@ -600,6 +775,11 @@ public:
         return btck_transaction_count_outputs(impl());
     }
 
+    bool IsCoinbase() const
+    {
+        return btck_transaction_is_coinbase(impl()) != 0;
+    }
+
     size_t CountInputs() const
     {
         return btck_transaction_count_inputs(impl());
@@ -615,14 +795,29 @@ public:
         return TransactionInputView{btck_transaction_get_input_at(impl(), index)};
     }
 
+    uint32_t GetVersion() const
+    {
+        return btck_transaction_get_version(impl());
+    }
+
     uint32_t GetLocktime() const
     {
         return btck_transaction_get_locktime(impl());
     }
 
+    bool HasWitness() const
+    {
+        return btck_transaction_has_witness(impl()) != 0;
+    }
+
     TxidView Txid() const
     {
         return TxidView{btck_transaction_get_txid(impl())};
+    }
+
+    WtxidView Wtxid() const
+    {
+        return WtxidView{btck_transaction_get_wtxid(impl())};
     }
 
     MAKE_RANGE_METHOD(Outputs, Derived, &TransactionApi<Derived>::CountOutputs, &TransactionApi<Derived>::GetOutput, *static_cast<const Derived*>(this))
@@ -751,6 +946,13 @@ public:
         return BlockHashView{btck_block_header_get_prev_hash(impl())};
     }
 
+    std::array<std::byte, 32> MerkleRoot() const
+    {
+        std::array<std::byte, 32> merkle_root;
+        btck_block_header_get_merkle_root(impl(), reinterpret_cast<unsigned char*>(merkle_root.data()));
+        return merkle_root;
+    }
+
     uint32_t Timestamp() const
     {
         return btck_block_header_get_timestamp(impl());
@@ -849,46 +1051,58 @@ public:
     }
 };
 
-inline void logging_disable()
+//! Non-owning view over a btck_LogEntry. The referenced entry is only valid for the duration of the
+//! logging callback, so a LogEntry (and any string_view obtained from it) must not be stored or
+//! used after the callback returns.
+class LogEntry
 {
-    btck_logging_disable();
-}
+private:
+    const btck_LogEntry* m_entry;
 
-inline void logging_set_options(const btck_LoggingOptions& logging_options)
-{
-    btck_logging_set_options(logging_options);
-}
+public:
+    explicit LogEntry(const btck_LogEntry& entry) : m_entry{&entry} {}
 
-inline void logging_set_level_category(LogCategory category, LogLevel level)
-{
-    btck_logging_set_level_category(static_cast<btck_LogCategory>(category), static_cast<btck_LogLevel>(level));
-}
-
-inline void logging_enable_category(LogCategory category)
-{
-    btck_logging_enable_category(static_cast<btck_LogCategory>(category));
-}
-
-inline void logging_disable_category(LogCategory category)
-{
-    btck_logging_disable_category(static_cast<btck_LogCategory>(category));
-}
+    std::string_view Message() const { return {m_entry->message, m_entry->message_len}; }
+    std::string_view ThreadName() const { return {m_entry->thread_name, m_entry->thread_name_len}; }
+    std::chrono::sys_time<std::chrono::nanoseconds> Timestamp() const
+    {
+        return std::chrono::sys_time<std::chrono::nanoseconds>{std::chrono::nanoseconds{m_entry->timestamp_ns}};
+    }
+    std::optional<std::chrono::sys_seconds> MockTime() const
+    {
+        if (m_entry->mocktime_s == 0) return std::nullopt;
+        return std::chrono::sys_seconds{std::chrono::seconds{m_entry->mocktime_s}};
+    }
+    std::string_view FileName() const { return {m_entry->file_name, m_entry->file_name_len}; }
+    std::string_view FunctionName() const { return {m_entry->function_name, m_entry->function_name_len}; }
+    uint32_t Line() const { return m_entry->line; }
+    LogLevel Level() const { return static_cast<LogLevel>(m_entry->level); }
+    LogCategory Category() const { return static_cast<LogCategory>(m_entry->category); }
+};
 
 template <typename T>
-concept Log = requires(T a, std::string_view message) {
-    { a.LogMessage(message) } -> std::same_as<void>;
+concept Log = requires(T a, const LogEntry& entry) {
+    { a.LogMessage(entry) } -> std::same_as<void>;
 };
 
 template <Log T>
 class Logger : UniqueHandle<btck_LoggingConnection, btck_logging_connection_destroy>
 {
 public:
+    using UniqueHandle::get;
+
     Logger(std::unique_ptr<T> log)
         : UniqueHandle{btck_logging_connection_create(
-              +[](void* user_data, const char* message, size_t message_len) { static_cast<T*>(user_data)->LogMessage({message, message_len}); },
+              +[](void* user_data, const btck_LogEntry* entry) { static_cast<T*>(user_data)->LogMessage(LogEntry{*entry}); },
               log.release(),
               +[](void* user_data) { delete static_cast<T*>(user_data); })}
     {
+    }
+
+    //! Set the minimum level of entries delivered to this logger. Defaults to INFO_LEVEL.
+    void SetMinLevel(LogLevel level)
+    {
+        btck_logging_set_min_level(get(), static_cast<btck_LogLevel>(level));
     }
 };
 
@@ -954,6 +1168,20 @@ public:
     virtual void FatalErrorHandler(std::string_view error) {}
 };
 
+template <typename State>
+std::string copy_state_string(const State* state, int (*getter)(const State*, char*, size_t, size_t*))
+{
+    size_t written{0};
+    if (getter(state, nullptr, 0, &written) != 0 || written == 0) {
+        return {};
+    }
+    std::vector<char> buffer(written);
+    if (getter(state, buffer.data(), buffer.size(), &written) != 0) {
+        return {};
+    }
+    return std::string(buffer.data(), written - 1);
+}
+
 template <typename Derived>
 class BlockValidationStateApi
 {
@@ -976,6 +1204,11 @@ public:
     {
         return static_cast<BlockValidationResult>(btck_block_validation_state_get_block_validation_result(impl()));
     }
+
+    std::string GetRejectReason() const
+    {
+        return copy_state_string(impl(), btck_block_validation_state_get_reject_reason);
+    }
 };
 
 class BlockValidationStateView : public View<btck_BlockValidationState>, public BlockValidationStateApi<BlockValidationStateView>
@@ -989,7 +1222,9 @@ class BlockValidationState : public Handle<btck_BlockValidationState, btck_block
 public:
     explicit BlockValidationState() : Handle{btck_block_validation_state_create()} {}
 
-    BlockValidationState(const BlockValidationStateView& view) : Handle{view} {}
+    explicit BlockValidationState(const BlockValidationStateView& view) : Handle{view} {}
+
+    explicit BlockValidationState(btck_BlockValidationState* state) : Handle{state} {}
 };
 
 inline bool Block::Check(const ConsensusParamsView& consensus_params,
@@ -997,6 +1232,33 @@ inline bool Block::Check(const ConsensusParamsView& consensus_params,
     BlockValidationState& state) const
 {
     return btck_block_check(get(), consensus_params.get(), static_cast<btck_BlockCheckFlags>(flags), state.get()) == 1;
+}
+
+class TxValidationState : public UniqueHandle<btck_TxValidationState, btck_tx_validation_state_destroy>
+{
+public:
+    using UniqueHandle::UniqueHandle; // inherit ctor
+    explicit TxValidationState() : UniqueHandle{btck_tx_validation_state_create()} {}
+
+    ValidationMode GetValidationMode() const
+    {
+        return static_cast<ValidationMode>(btck_tx_validation_state_get_validation_mode(get()));
+    }
+
+    TxValidationResult GetTxValidationResult() const
+    {
+        return static_cast<TxValidationResult>(btck_tx_validation_state_get_tx_validation_result(get()));
+    }
+
+    std::string GetRejectReason() const
+    {
+        return copy_state_string(get(), btck_tx_validation_state_get_reject_reason);
+    }
+};
+
+inline bool CheckTransaction(const Transaction& tx, TxValidationState& state)
+{
+    return btck_transaction_check(tx.get(), state.get()) == 1;
 }
 
 class ValidationInterface
@@ -1016,8 +1278,11 @@ public:
 class ChainParams : public Handle<btck_ChainParameters, btck_chain_parameters_copy, btck_chain_parameters_destroy>
 {
 public:
-    ChainParams(ChainType chain_type)
+    explicit ChainParams(ChainType chain_type)
         : Handle{btck_chain_parameters_create(static_cast<btck_ChainType>(chain_type))} {}
+
+    explicit ChainParams(std::span<const std::byte> signet_challenge)
+        : Handle{btck_chain_parameters_create_signet(signet_challenge.data(), signet_challenge.size())} {}
 
     ConsensusParamsView GetConsensusParams() const
     {
@@ -1033,6 +1298,14 @@ public:
     void SetChainParams(ChainParams& chain_params)
     {
         btck_context_options_set_chainparams(get(), chain_params.get());
+    }
+
+    //! Deliver log entries from the context created with these options to the logger. The logger
+    //! must outlive these options, and every Context and ChainMan created with them.
+    template <Log T>
+    void SetLogger(Logger<T>& logger)
+    {
+        btck_context_options_set_logger(get(), logger.get());
     }
 
     template <typename T>
@@ -1104,19 +1377,29 @@ public:
         btck_chainstate_manager_options_set_worker_threads_num(get(), worker_threads);
     }
 
+    bool SetDatabaseCacheBytes(uint64_t database_cache_bytes)
+    {
+        return btck_chainstate_manager_options_set_database_cache_bytes(get(), database_cache_bytes) == 0;
+    }
+
     bool SetWipeDbs(bool wipe_block_tree, bool wipe_chainstate)
     {
         return btck_chainstate_manager_options_set_wipe_dbs(get(), wipe_block_tree, wipe_chainstate) == 0;
     }
 
-    void UpdateBlockTreeDbInMemory(bool block_tree_db_in_memory)
+    bool SetReadOnly(bool read_only)
     {
-        btck_chainstate_manager_options_update_block_tree_db_in_memory(get(), block_tree_db_in_memory);
+        return btck_chainstate_manager_options_set_read_only(get(), read_only ? 1 : 0) == 0;
     }
 
     void UpdateChainstateDbInMemory(bool chainstate_db_in_memory)
     {
         btck_chainstate_manager_options_update_chainstate_db_in_memory(get(), chainstate_db_in_memory);
+    }
+
+    void SetAssumeValid(const std::optional<BlockHash> block_hash)
+    {
+        btck_chainstate_manager_options_set_assumevalid_block(get(), block_hash ? block_hash->get() : nullptr);
     }
 };
 
@@ -1182,6 +1465,9 @@ public:
 class Coin : public Handle<btck_Coin, btck_coin_copy, btck_coin_destroy>, public CoinApi<Coin>
 {
 public:
+    Coin(const TransactionOutput& output, uint32_t confirmation_height, bool is_coinbase)
+        : Handle{btck_coin_create(output.get(), confirmation_height, is_coinbase)} {}
+
     Coin(btck_Coin* coin) : Handle{coin} {}
 
     Coin(const CoinView& view) : Handle{view} {}
@@ -1249,6 +1535,14 @@ public:
     MAKE_RANGE_METHOD(TxsSpentOutputs, BlockSpentOutputs, &BlockSpentOutputs::Count, &BlockSpentOutputs::GetTxSpentOutputs, *this)
 };
 
+class CoinFetcher
+{
+public:
+    virtual ~CoinFetcher() = default;
+
+    virtual std::optional<Coin> FetchCoin(OutPointView out_point) = 0;
+};
+
 class ChainMan : UniqueHandle<btck_ChainstateManager, btck_chainstate_manager_destroy>
 {
 public:
@@ -1279,9 +1573,49 @@ public:
         return res == 0;
     }
 
-    bool ProcessBlockHeader(const BlockHeader& header, BlockValidationState& state)
+    bool Flush()
     {
-        return btck_chainstate_manager_process_block_header(get(), header.get(), state.get()) == 0;
+        return btck_chainstate_manager_flush(get()) == 0;
+    }
+
+    std::optional<Coin> GetCoin(const OutPointView& out_point) const
+    {
+        btck_Coin* coin{btck_chainstate_manager_get_coin(get(), out_point.get())};
+        if (!coin) return std::nullopt;
+        return Coin{coin};
+    }
+
+    BlockValidationState ProcessBlockHeader(const BlockHeader& header)
+    {
+        auto state = btck_chainstate_manager_process_block_header(get(), header.get());
+        return BlockValidationState{state};
+    }
+
+    bool CheckTx(const Transaction& tx, TxValidationState& state)
+    {
+        return btck_chainstate_manager_check_tx(get(), tx.get(), state.get()) == 1;
+    }
+
+    bool ValidateBlock(const Block& block,
+                       const BlockTreeEntry& entry,
+                       CoinFetcher& fetcher,
+                       BlockValidationState& state)
+    {
+        return btck_chainstate_manager_validate_block(
+                   get(), block.get(), entry.get(),
+                   +[](void* user_data, const btck_TransactionOutPoint* out_point) -> btck_Coin* {
+                       auto coin{static_cast<CoinFetcher*>(user_data)->FetchCoin(OutPointView{out_point})};
+                       if (!coin) return nullptr;
+                       return btck_coin_copy(coin->get());
+                   },
+                   &fetcher, state.get()) == 0;
+    }
+
+    void SetClockTime(std::optional<std::chrono::seconds> now)
+    {
+        if (btck_chainstate_manager_set_clock_time(get(), now ? now->count() : 0) != 0) {
+            throw std::runtime_error("timestamp out of range");
+        }
     }
 
     ChainView GetChain() const
@@ -1313,6 +1647,96 @@ public:
         return btck_block_spent_outputs_read(get(), entry.get());
     }
 };
+
+inline void set_mock_time(std::chrono::seconds timestamp)
+{
+    if (btck_set_mock_time(timestamp.count()) != 0) {
+        throw std::runtime_error("timestamp out of range");
+    }
+}
+
+class ScriptEvalStackItemView : public View<btck_ScriptEvalStackItem>
+{
+public:
+    explicit ScriptEvalStackItemView(const btck_ScriptEvalStackItem* ptr) : View{ptr} {}
+
+    std::vector<std::byte> ToBytes() const
+    {
+        return write_bytes(get(), btck_script_eval_stack_item_to_bytes);
+    }
+};
+
+class ScriptEvalStackView : public View<btck_ScriptEvalStack>
+{
+public:
+    explicit ScriptEvalStackView(const btck_ScriptEvalStack* ptr) : View{ptr} {}
+
+    size_t CountItems() const { return btck_script_eval_stack_count_items(get()); }
+
+    ScriptEvalStackItemView GetItem(size_t index) const
+    {
+        return ScriptEvalStackItemView{btck_script_eval_stack_get_item_at(get(), index)};
+    }
+
+    MAKE_RANGE_METHOD(Items, ScriptEvalStackView, &ScriptEvalStackView::CountItems, &ScriptEvalStackView::GetItem, *this)
+};
+
+class ScriptTraceFrameView : public View<btck_ScriptTraceFrame>
+{
+public:
+    explicit ScriptTraceFrameView(const btck_ScriptTraceFrame* ptr) : View{ptr} {}
+
+    ScriptTraceFrameKind Kind() const { return static_cast<ScriptTraceFrameKind>(btck_script_trace_frame_get_kind(get())); }
+
+    ScriptEvalStackView GetStack() const { return ScriptEvalStackView{btck_script_trace_frame_get_stack(get())}; }
+    ScriptEvalStackView GetAltstack() const { return ScriptEvalStackView{btck_script_trace_frame_get_altstack(get())}; }
+
+    std::vector<std::byte> GetScript() const
+    {
+        return write_bytes(get(), btck_script_trace_frame_get_script);
+    }
+    uint32_t OpcodePos() const { return btck_script_trace_frame_get_opcode_pos(get()); }
+    bool Exec() const { return btck_script_trace_frame_get_exec(get()) != 0; }
+    uint8_t Opcode() const { return btck_script_trace_frame_get_opcode(get()); }
+    int OpCount() const { return btck_script_trace_frame_get_op_count(get()); }
+    SigVersion GetSigVersion() const { return static_cast<SigVersion>(btck_script_trace_frame_get_sig_version(get())); }
+    uint32_t CodeseparatorPos() const { return btck_script_trace_frame_get_codeseparator_pos(get()); }
+
+    std::optional<int32_t> GetScriptError() const
+    {
+        const int32_t script_error{btck_script_trace_frame_get_script_error(get())};
+        if (script_error < 0) return std::nullopt;
+        return script_error;
+    }
+
+    std::optional<std::array<unsigned char, 32>> TapleafHash() const
+    {
+        std::array<unsigned char, 32> hash;
+        if (btck_script_trace_frame_get_tapleaf_hash(get(), hash.data()) != 0) return std::nullopt;
+        return hash;
+    }
+};
+
+template <typename T>
+concept ScriptTraceT = requires(T a, const ScriptTraceFrameView& frame) {
+    { a.ScriptTrace(frame) } -> std::same_as<void>;
+};
+
+template <ScriptTraceT T>
+void ScriptTraceSetCallback(std::unique_ptr<T> trace)
+{
+    if (btck_script_trace_register_callback(
+            +[](void* user_data, const btck_ScriptTraceFrame* trace) { static_cast<T*>(user_data)->ScriptTrace(ScriptTraceFrameView{trace}); },
+            trace.release(),
+            +[](void* user_data) { delete static_cast<T*>(user_data); }) != 0) {
+        throw std::runtime_error("Script Tracing is not available. Compile bitcoin kernel with ENABLE_SCRIPT_TRACE");
+    }
+}
+
+inline void ScriptTraceUnsetCallback()
+{
+    btck_script_trace_unregister_callback();
+}
 
 } // namespace btck
 

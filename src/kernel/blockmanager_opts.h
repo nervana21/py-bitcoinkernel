@@ -15,7 +15,7 @@ class CChainParams;
 
 namespace kernel {
 
-static constexpr bool DEFAULT_XOR_BLOCKSDIR{true};
+inline constexpr bool DEFAULT_XOR_BLOCKSDIR{true};
 
 /**
  * An options struct for `BlockManager`, more ergonomically referred to as
@@ -27,8 +27,11 @@ struct BlockManagerOpts {
     uint64_t prune_target{0};
     bool fast_prune{false};
     const fs::path blocks_dir;
+    const fs::path block_tree_dir;
+    bool wipe_block_tree_data{false};
+    //! Open the block tree without the writer lock. Writes are refused.
+    bool read_only{false};
     Notifications& notifications;
-    DBParams block_tree_db_params;
 };
 
 } // namespace kernel

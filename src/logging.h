@@ -27,12 +27,12 @@
 #include <unordered_map>
 #include <vector>
 
-static const bool DEFAULT_LOGTIMEMICROS = false;
-static const bool DEFAULT_LOGIPS        = false;
-static const bool DEFAULT_LOGTIMESTAMPS = true;
-static const bool DEFAULT_LOGTHREADNAMES = false;
-static const bool DEFAULT_LOGSOURCELOCATIONS = false;
-static constexpr bool DEFAULT_LOGLEVELALWAYS = false;
+inline constexpr bool DEFAULT_LOGTIMEMICROS = false;
+inline constexpr bool DEFAULT_LOGIPS        = false;
+inline constexpr bool DEFAULT_LOGTIMESTAMPS = true;
+inline constexpr bool DEFAULT_LOGTHREADNAMES = false;
+inline constexpr bool DEFAULT_LOGSOURCELOCATIONS = false;
+inline constexpr bool DEFAULT_LOGLEVELALWAYS = false;
 extern const char * const DEFAULT_DEBUGLOGFILE;
 
 extern bool fLogIPs;
@@ -61,11 +61,11 @@ struct LogCategory {
 };
 
 namespace BCLog {
-    constexpr auto DEFAULT_LOG_LEVEL{Level::Debug};
-    constexpr size_t DEFAULT_MAX_LOG_BUFFER{1'000'000}; // buffer up to 1MB of log data prior to StartLogging
-    constexpr uint64_t RATELIMIT_MAX_BYTES{1_MiB}; // maximum number of bytes per source location that can be logged within the RATELIMIT_WINDOW
-    constexpr auto RATELIMIT_WINDOW{1h}; // time window after which log ratelimit stats are reset
-    constexpr bool DEFAULT_LOGRATELIMIT{true};
+    inline constexpr auto DEFAULT_LOG_LEVEL{Level::Debug};
+    inline constexpr size_t DEFAULT_MAX_LOG_BUFFER{1'000'000}; // buffer up to 1MB of log data prior to StartLogging
+    inline constexpr uint64_t RATELIMIT_MAX_BYTES{1_MiB}; // maximum number of bytes per source location that can be logged within the RATELIMIT_WINDOW
+    inline constexpr auto RATELIMIT_WINDOW{1h}; // time window after which log ratelimit stats are reset
+    inline constexpr bool DEFAULT_LOGRATELIMIT{true};
 
     //! Fixed window rate limiter for logging.
     class LogRateLimiter
@@ -127,7 +127,7 @@ namespace BCLog {
         bool SuppressionsActive() const { return m_suppression_active; }
     };
 
-    class Logger
+    class Logger : public util::log::Logger
     {
     private:
         mutable StdMutex m_cs; // Can not use Mutex from sync.h because in debug mode it would cause a deadlock when a potential deadlock was detected
@@ -160,7 +160,7 @@ namespace BCLog {
         std::list<std::function<void(const std::string&)>> m_print_callbacks GUARDED_BY(m_cs){};
 
         /** Send an entry to the log output (internal) */
-        void LogPrint_(util::log::Entry log_entry) EXCLUSIVE_LOCKS_REQUIRED(m_cs);
+        void LogPrint_(const util::log::Options& options, util::log::Entry entry) EXCLUSIVE_LOCKS_REQUIRED(m_cs);
 
         std::string GetLogPrefix(LogFlags category, Level level) const;
 
@@ -177,8 +177,11 @@ namespace BCLog {
         fs::path m_file_path;
         std::atomic<bool> m_reopen_file{false};
 
+        Logger();
+        ~Logger();
+
         /** Send an entry to the log output */
-        void LogPrint(util::log::Entry log_entry) EXCLUSIVE_LOCKS_REQUIRED(!m_cs);
+        void LogPrint(const util::log::Options& options, util::log::Entry entry) EXCLUSIVE_LOCKS_REQUIRED(!m_cs);
 
         /** Returns whether logs will be written to any output */
         bool Enabled() const EXCLUSIVE_LOCKS_REQUIRED(!m_cs)
@@ -222,12 +225,11 @@ namespace BCLog {
         /** Disable logging
          * This offers a slight speedup and slightly smaller memory usage
          * compared to leaving the logging system in its default state.
-         * Mostly intended for libbitcoin-kernel apps that don't want any logging.
          * Should be used instead of StartLogging().
          */
         void DisableLogging() EXCLUSIVE_LOCKS_REQUIRED(!m_cs);
 
-        void ShrinkDebugFile();
+        void ShrinkDebugFile() EXCLUSIVE_LOCKS_REQUIRED(!m_cs);
 
         std::unordered_map<LogFlags, Level> CategoryLevels() const EXCLUSIVE_LOCKS_REQUIRED(!m_cs)
         {
@@ -275,19 +277,12 @@ namespace BCLog {
         static std::string LogLevelToStr(BCLog::Level level);
 
         bool DefaultShrinkDebugFile() const;
-    };
 
+        //! Return log flag if str parses as a log category.
+        static std::optional<BCLog::LogFlags> GetLogCategory(std::string_view str);
+    };
 } // namespace BCLog
 
 BCLog::Logger& LogInstance();
-
-/** Return true if log accepts specified category, at the specified level. */
-static inline bool LogAcceptCategory(BCLog::LogFlags category, BCLog::Level level)
-{
-    return LogInstance().WillLogCategoryLevel(category, level);
-}
-
-/// Return log flag if str parses as a log category.
-std::optional<BCLog::LogFlags> GetLogCategory(std::string_view str);
 
 #endif // BITCOIN_LOGGING_H

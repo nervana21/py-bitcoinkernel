@@ -11,8 +11,6 @@
 #include <util/byte_units.h>
 
 #include <cstdint>
-#include <string>
-#include <vector>
 
 namespace {
 FuzzedDataProvider* fuzzed_data_provider_ptr = nullptr;
@@ -32,13 +30,14 @@ FUZZ_TARGET(cuckoocache)
     FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
     fuzzed_data_provider_ptr = &fuzzed_data_provider;
     CuckooCache::cache<int, RandomHasher> cuckoo_cache{};
+    LOCK(cuckoo_cache.m_mutex);
     if (fuzzed_data_provider.ConsumeBool()) {
         const size_t megabytes = fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, 16);
         cuckoo_cache.setup_bytes(megabytes * 1_MiB);
     } else {
         cuckoo_cache.setup(fuzzed_data_provider.ConsumeIntegralInRange<uint32_t>(0, 4096));
     }
-    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 10000) {
+    LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 10000) {
         if (fuzzed_data_provider.ConsumeBool()) {
             cuckoo_cache.insert(fuzzed_data_provider.ConsumeBool());
         } else {

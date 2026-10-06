@@ -6,34 +6,32 @@
 #define BITCOIN_TEST_UTIL_SETUP_COMMON_H
 
 #include <common/args.h> // IWYU pragma: export
+#include <consensus/amount.h>
 #include <kernel/caches.h>
-#include <kernel/context.h>
 #include <key.h>
+#include <logging.h>
 #include <node/caches.h>
 #include <node/context.h> // IWYU pragma: export
-#include <optional>
-#include <ostream>
 #include <primitives/transaction.h>
-#include <pubkey.h>
-#include <stdexcept>
+#include <random.h>
+#include <test/util/net.h>
 #include <test/util/random.h>
+#include <test/util/time.h>
 #include <util/chaintype.h> // IWYU pragma: export
-#include <util/check.h>
 #include <util/fs.h>
 #include <util/signalinterrupt.h>
-#include <util/string.h>
 #include <util/vector.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
-#include <type_traits>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
 #include <vector>
 
-class arith_uint256;
 class CFeeRate;
-class Chainstate;
-class FastRandomContext;
-class uint160;
-class uint256;
 
 /** Retrieve the command line arguments. */
 extern const std::function<std::vector<const char*>()> G_TEST_COMMAND_LINE_ARGUMENTS;
@@ -41,7 +39,7 @@ extern const std::function<std::vector<const char*>()> G_TEST_COMMAND_LINE_ARGUM
 /** Retrieve the unit test name. */
 extern const std::function<std::string()> G_TEST_GET_FULL_NAME;
 
-static constexpr CAmount CENT{1000000};
+inline constexpr CAmount CENT{1'000'000};
 
 /** Register common test args. Shared across binaries that rely on the test framework. */
 void SetupCommonTestArgs(ArgsManager& argsman);
@@ -49,7 +47,6 @@ void SetupCommonTestArgs(ArgsManager& argsman);
 struct TestOpts {
     std::vector<const char*> extra_args{};
     bool coins_db_in_memory{true};
-    bool block_tree_db_in_memory{true};
     bool setup_net{true};
     bool setup_validation_interface{true};
     bool min_validation_cache{false}; // Equivalent of -maxsigcachebytes=0
@@ -59,6 +56,7 @@ struct TestOpts {
  * This just configures logging, data dir and chain parameters.
  */
 struct BasicTestingSetup {
+    BCLog::Logger m_logger;
     util::SignalInterrupt m_interrupt;
     node::NodeContext m_node; // keep as first member to be destructed last
 
@@ -103,11 +101,14 @@ struct BasicTestingSetup {
 struct ChainTestingSetup : public BasicTestingSetup {
     kernel::CacheSizes m_kernel_cache_sizes{node::CalculateCacheSizes(m_args).kernel};
     bool m_coins_db_in_memory{true};
-    bool m_block_tree_db_in_memory{true};
     std::function<void()> m_make_chainman{};
 
     explicit ChainTestingSetup(ChainType chainType = ChainType::MAIN, TestOpts = {});
     ~ChainTestingSetup();
+
+    //! Create the block template manager. Must be destroyed before resetting
+    //! any of its dependencies.
+    void CreateBlockTemplateManager();
 
     // Supplies a chainstate, if one is needed
     void LoadVerifyActivateChainstate();
@@ -134,7 +135,6 @@ struct Testnet4Setup : public TestingSetup {
 };
 
 class CBlock;
-struct CMutableTransaction;
 class CScript;
 
 /**
@@ -148,11 +148,9 @@ struct TestChain100Setup : public TestingSetup {
     /**
      * Create a new block with just given transactions, coinbase paying to
      * scriptPubKey, and try to add it to the current chain.
-     * If no chainstate is specified, default to the active.
      */
     CBlock CreateAndProcessBlock(const std::vector<CMutableTransaction>& txns,
-                                 const CScript& scriptPubKey,
-                                 Chainstate* chainstate = nullptr);
+                                 const CScript& scriptPubKey);
 
     /**
      * Create a new block with just given transactions, coinbase paying to
@@ -160,8 +158,7 @@ struct TestChain100Setup : public TestingSetup {
      */
     CBlock CreateBlock(
         const std::vector<CMutableTransaction>& txns,
-        const CScript& scriptPubKey,
-        Chainstate& chainstate);
+        const CScript& scriptPubKey);
 
     //! Mine a series of new blocks on the active chain.
     void mineBlocks(int num_blocks);
@@ -235,6 +232,7 @@ struct TestChain100Setup : public TestingSetup {
      */
     std::vector<CTransactionRef> PopulateMempool(FastRandomContext& det_rand, size_t num_transactions, bool submit);
 
+    FakeNodeClock m_clock{std::chrono::seconds{1598887952}}; // 2020-08-31, arbitrary
     std::vector<CTransactionRef> m_coinbase_txns; // For convenience, coinbase transactions
     CKey coinbaseKey; // private/public key needed to spend coinbase transactions
 };
@@ -255,6 +253,34 @@ std::unique_ptr<T> MakeNoLogFileContext(const ChainType chain_type = ChainType::
 
     return std::make_unique<T>(chain_type, opts);
 }
+
+class SocketTestingSetup : public BasicTestingSetup
+{
+public:
+    explicit SocketTestingSetup();
+    ~SocketTestingSetup();
+
+    /**
+     * Connect to the socket with a mock client and send pre-loaded data.
+     * Returns the I/O pipes from the mock client so we can read response data sent to it.
+     * Template parameter selects the socket type: DynSock by default.
+     */
+    template <typename T = DynSock>
+    std::shared_ptr<typename T::Pipes> ConnectClient(std::span<const std::byte> data)
+    {
+        auto connected_socket_pipes(std::make_shared<typename T::Pipes>());
+        connected_socket_pipes->recv.PushBytes(data.data(), data.size());
+        m_accepted_sockets.Push(std::make_unique<T>(connected_socket_pipes));
+        return connected_socket_pipes;
+    }
+
+private:
+    //! Save the original value of CreateSock here and restore it when the test ends.
+    decltype(CreateSock) m_create_sock_orig;
+
+    //! Queue of connected sockets returned by listening socket (represents network interface)
+    DynSock::Queue m_accepted_sockets;
+};
 
 CBlock getBlock13b8a();
 

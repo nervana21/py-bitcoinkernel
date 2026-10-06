@@ -5,6 +5,8 @@
 #ifndef BITCOIN_NODE_CHAINSTATE_H
 #define BITCOIN_NODE_CHAINSTATE_H
 
+#include <kernel/notifications_interface.h>
+#include <util/result.h>
 #include <util/translation.h>
 #include <validation.h>
 
@@ -26,6 +28,8 @@ struct ChainstateLoadOptions {
     // Whether to wipe the chainstate database when loading it. If set, this
     // will cause the chainstate database to be rebuilt starting from genesis.
     bool wipe_chainstate_db{false};
+    //! Open the coins store for reading. Replay and cache flushes that write are refused.
+    bool read_only{false};
     bool prune{false};
     //! Setting require_full_verification to true will require all checks at
     //! check_level (below) to succeed for loading to succeed. Setting it to
@@ -41,34 +45,17 @@ struct ChainstateLoadOptions {
 //! case, and treat other cases as errors. More complex applications may want to
 //! try reindexing in the generic failure case, and pass an interrupt callback
 //! and exit cleanly in the interrupted case.
-enum class ChainstateLoadStatus {
-    SUCCESS,
+enum class ChainstateLoadError {
     FAILURE, //!< Generic failure which reindexing may fix
     FAILURE_FATAL, //!< Fatal error which should not prompt to reindex
     FAILURE_INCOMPATIBLE_DB,
     FAILURE_INSUFFICIENT_DBCACHE,
-    INTERRUPTED,
 };
 
-//! Chainstate load status code and optional error string.
-using ChainstateLoadResult = std::tuple<ChainstateLoadStatus, bilingual_str>;
-
-/** This sequence can have 4 types of outcomes:
- *
- *  1. Success
- *  2. Shutdown requested
- *    - nothing failed but a shutdown was triggered in the middle of the
- *      sequence
- *  3. Soft failure
- *    - a failure that might be recovered from with a reindex
- *  4. Hard failure
- *    - a failure that definitively cannot be recovered from with a reindex
- *
- *  LoadChainstate returns a (status code, error string) tuple.
- */
-ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const kernel::CacheSizes& cache_sizes,
-                                    const ChainstateLoadOptions& options);
-ChainstateLoadResult VerifyLoadedChainstate(ChainstateManager& chainman, const ChainstateLoadOptions& options);
+kernel::FlushResult<kernel::InterruptResult, ChainstateLoadError> LoadChainstate(ChainstateManager& chainman, const kernel::CacheSizes& cache_sizes,
+                                                                                 const ChainstateLoadOptions& options)
+    EXCLUSIVE_LOCKS_REQUIRED(!chainman.m_blockman.m_index_mutex);
+kernel::FlushResult<kernel::InterruptResult, ChainstateLoadError> VerifyLoadedChainstate(ChainstateManager& chainman, const ChainstateLoadOptions& options);
 } // namespace node
 
 #endif // BITCOIN_NODE_CHAINSTATE_H
