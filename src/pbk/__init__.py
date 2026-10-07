@@ -27,13 +27,9 @@ from pbk.context import Context, ContextOptions
 from pbk.log import (
     KernelLogViewer,
     LogCategory,
+    LogEntry,
     LogLevel,
     LoggingConnection,
-    LoggingOptions,
-    enable_log_category,
-    disable_log_category,
-    logging_set_options,
-    set_log_level_category,
 )
 from pbk.script import (
     PrecomputedTransactionData,
@@ -87,9 +83,9 @@ __all__ = [
     "KernelException",
     "KernelLogViewer",
     "LogCategory",
+    "LogEntry",
     "LogLevel",
     "LoggingConnection",
-    "LoggingOptions",
     "PrecomputedTransactionData",
     "ProcessBlockException",
     "ProcessBlockHeaderException",
@@ -109,10 +105,6 @@ __all__ = [
     "Txid",
     "ValidationMode",
     "ValidationInterfaceCallbacks",
-    "disable_log_category",
-    "enable_log_category",
-    "logging_set_options",
-    "set_log_level_category",
 ]
 
 from pathlib import Path

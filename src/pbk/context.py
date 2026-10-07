@@ -5,6 +5,7 @@ from pbk.capi import KernelOpaquePtr
 
 if typing.TYPE_CHECKING:
     from pbk.chain import ChainParameters
+    from pbk.log import LoggingConnection
     from pbk.notifications import NotificationInterfaceCallbacks
     from pbk.validation import ValidationInterfaceCallbacks
 
@@ -25,6 +26,7 @@ class ContextOptions(KernelOpaquePtr):
         super().__init__()
         self._notifications: NotificationInterfaceCallbacks | None = None
         self._validation_callbacks: ValidationInterfaceCallbacks | None = None
+        self._logger: LoggingConnection | None = None
 
     def set_chainparams(self, chain_parameters: "ChainParameters") -> None:
         """Sets the chain parameters for the context options.
@@ -56,6 +58,19 @@ class ContextOptions(KernelOpaquePtr):
         k.btck_context_options_set_validation_interface(self, interface_callbacks)
         self._validation_callbacks = interface_callbacks
 
+    def set_logger(self, logging_connection: "LoggingConnection") -> None:
+        """Attach a logging connection to contexts built from these options.
+
+        The LoggingConnection must outlive every Context created from these
+        options. Entries are delivered only for work associated with that
+        context.
+
+        Args:
+            logging_connection: Connection created by LoggingConnection.
+        """
+        k.btck_context_options_set_logger(self, logging_connection)
+        self._logger = logging_connection
+
 
 class Context(KernelOpaquePtr):
     """The kernel context is used to initialize internal state and hold the chain
@@ -75,18 +90,20 @@ class Context(KernelOpaquePtr):
         super().__init__(options)
         self._notifications = options._notifications
         self._validation_callbacks = options._validation_callbacks
+        self._logger = options._logger
 
     def __copy__(self) -> "Context":
         """Return an independent handle to the same kernel context.
 
         Propagates Python-side keepalives for the notification and validation
-        callbacks: the kernel stores raw function pointers into ctypes
-        trampolines owned by these Python objects, so the copy must keep them
-        alive even if the source handle is dropped.
+        callbacks and the logging connection: the kernel stores raw function
+        pointers into ctypes trampolines owned by these Python objects, so the
+        copy must keep them alive even if the source handle is dropped.
         """
         copy = super().__copy__()
         copy._notifications = self._notifications
         copy._validation_callbacks = self._validation_callbacks
+        copy._logger = self._logger
         return copy
 
     def interrupt(self) -> int:

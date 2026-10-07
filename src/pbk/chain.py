@@ -139,20 +139,6 @@ class ChainstateManagerOptions(KernelOpaquePtr):
         """
         k.btck_chainstate_manager_options_set_worker_threads_num(self, worker_threads)
 
-    def update_block_tree_db_in_memory(self, block_tree_db_in_memory: bool) -> None:
-        """Configure whether to use an in-memory block tree database.
-
-        When enabled, the block tree database is stored in memory instead
-        of on disk. Useful for testing or temporary validation tasks.
-
-        Args:
-            block_tree_db_in_memory: True to use in-memory storage,
-                False to use disk storage.
-        """
-        k.btck_chainstate_manager_options_update_block_tree_db_in_memory(
-            self, int(block_tree_db_in_memory)
-        )
-
     def update_chainstate_db_in_memory(self, chainstate_db_in_memory: bool) -> None:
         """Configure whether to use an in-memory chainstate database.
 
@@ -554,12 +540,11 @@ class ChainstateManager(KernelOpaquePtr):
         Raises:
             ProcessBlockHeaderException: If processing the block header failed. Duplicate block headers do not throw.
         """
-        state = BlockValidationState()
-        result = k.btck_chainstate_manager_process_block_header(self, header, state)
-        if result != 0:
-            raise ProcessBlockHeaderException(result)
+        state_ptr = k.btck_chainstate_manager_process_block_header(self, header)
+        if not state_ptr:
+            raise ProcessBlockHeaderException(-1)
 
-        return state
+        return BlockValidationState._from_handle(state_ptr)
 
     def __repr__(self) -> str:
         """Return a string representation of the chainstate manager."""

@@ -1,86 +1,47 @@
 import logging
-from datetime import datetime
 
 import pytest
 import pbk
 import pbk.log
 
 
-def dummy_fn(msg: str) -> None:
+def dummy_fn(entry: pbk.LogEntry) -> None:
     pass
 
 
 def test_is_valid_log_callback() -> None:
-    assert pbk.log.is_valid_log_callback(lambda msg: print(msg))
+    assert pbk.log.is_valid_log_callback(lambda entry: print(entry.message))
     assert pbk.log.is_valid_log_callback(dummy_fn)
 
     assert not pbk.log.is_valid_log_callback(lambda: print("hello"))
-    assert not pbk.log.is_valid_log_callback(lambda msg, dummy: print(msg))
+    assert not pbk.log.is_valid_log_callback(lambda entry, dummy: print(entry))
 
 
-def test_level_category() -> None:
-    pbk.set_log_level_category(pbk.LogCategory.ALL, pbk.LogLevel.DEBUG)
-    pbk.set_log_level_category(pbk.LogCategory.ALL, pbk.LogLevel.INFO)
-    pbk.set_log_level_category(
-        pbk.LogCategory.ALL, pbk.LogLevel.INFO
-    )  # Same operation twice should succeed
-
-    pbk.set_log_level_category(pbk.LogCategory.BLOCKSTORAGE, pbk.LogLevel.DEBUG)
-
-    pbk.enable_log_category(pbk.LogCategory.BLOCKSTORAGE)
-    pbk.enable_log_category(
-        pbk.LogCategory.BLOCKSTORAGE
-    )  # Same operation twice should succeed
-    pbk.disable_log_category(pbk.LogCategory.BLOCKSTORAGE)
-    pbk.disable_log_category(
-        pbk.LogCategory.BLOCKSTORAGE
-    )  # Same operation twice should succeed
+def test_logging_connection_min_level() -> None:
+    entries: list[pbk.LogEntry] = []
+    conn = pbk.LoggingConnection(cb=lambda entry: entries.append(entry))
+    conn.set_min_level(pbk.LogLevel.DEBUG)
+    conn.set_min_level(pbk.LogLevel.INFO)
+    conn.set_min_level(pbk.LogLevel.INFO)  # Same operation twice should succeed
 
 
 def test_kernel_log_viewer(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.DEBUG)
-    logger = pbk.KernelLogViewer(name="test_logger", categories=[])
-    assert logger.getLogger() == logging.getLogger("test_logger")
-
-    time = "2025-03-19T12:14:55Z"
-    thread = "unknown"
-    filename = "context.cpp"
-    path = f"depend/bitcoin/src/kernel/{filename}"
-    lineno = 20
-    func = "operator()"
-    category = "all"
-    level = "info"
-    msg = "Using the 'arm_shani(1way,2way)' SHA256 implementation"
-    log_string = (
-        f"{time} [{thread}] [{path}:{lineno}] [{func}] [{category}:{level}] {msg}"
+    viewer = pbk.KernelLogViewer(
+        name="test_logger",
+        categories=[pbk.LogCategory.KERNEL],
+        min_level=pbk.LogLevel.DEBUG,
     )
-    record = pbk.log.parse_btck_log_string(logger.name, log_string)
-    assert record.name == logger.name
-    assert record.levelno == logging.INFO
-    assert record.levelname == level.upper()
-    assert record.filename == filename
-    assert record.pathname == path
-    assert record.lineno == lineno
-    assert record.msg == msg
-    assert record.threadName == thread
-    assert record.funcName == func
-    assert record.created == datetime.strptime(time, "%Y-%m-%dT%H:%M:%SZ").timestamp()
+    assert viewer.getLogger() == logging.getLogger("test_logger")
 
-    with logger.temporary_categories(categories=[pbk.LogCategory.KERNEL]):
-        assert logger.getLogger().getEffectiveLevel() == logging.DEBUG
-        try:
-            pbk.Block(bytes.fromhex("ab"))
-        except RuntimeError:
-            pass
-        assert caplog.records[-1].message == "Block decode failed."
+    opts = pbk.ContextOptions()
+    opts.set_chainparams(pbk.ChainParameters(pbk.ChainType.REGTEST))
+    opts.set_logger(viewer.connection)
+    context = pbk.Context(opts)
 
-    debug_logger = pbk.KernelLogViewer(
-        name="debug_logger", categories=[pbk.LogCategory.KERNEL, pbk.LogCategory.PRUNE]
-    )
-    caplog.clear()
-    assert debug_logger.getLogger().getEffectiveLevel() == logging.DEBUG
-    try:
-        pbk.Block(bytes.fromhex("ab"))
-    except RuntimeError:
-        pass
-    assert caplog.records[-1].message == "Block decode failed."
+    # Tip logs only through a context-attached connection. An empty data
+    # directory path fails options creation and emits a KERNEL error.
+    with pytest.raises(RuntimeError):
+        pbk.ChainstateManagerOptions(context, "", "")
+
+    assert any("Failed to create chainstate manager options" in r.message for r in caplog.records)
