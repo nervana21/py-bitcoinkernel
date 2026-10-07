@@ -17,21 +17,33 @@ fi
 
 FILE="$1"
 
-# Normalize the TARGET arch line to remove local system paths
-sed -i.bak 's/^# TARGET arch is: \[.*\]$/# TARGET arch is: []/' "$FILE"
+python3 - "$FILE" <<'PY'
+import re
+import sys
+from pathlib import Path
 
-# Add the import after the ctypes import line
-sed -i.bak '/^import ctypes$/a\
-\
-from pbk.capi.library import BITCOINKERNEL_LIB
-' "$FILE"
+path = Path(sys.argv[1])
+text = path.read_text()
 
-# Replace _libraries['FIXME_STUB'] references with BITCOINKERNEL_LIB
-sed -i.bak "s/_libraries\['FIXME_STUB'\]/BITCOINKERNEL_LIB/g" "$FILE"
+text = re.sub(r"^# TARGET arch is: \[.*\]$", "# TARGET arch is: []", text, flags=re.M)
 
-# Remove the FunctionFactoryStub block (class, comments, stub assignment)
-# including 2 blank lines before and 1 after
-ex -sc '/^class FunctionFactoryStub/-2,/^BITCOINKERNEL_LIB = FunctionFactoryStub.*$/+1d' -cx "$FILE"
+if "from pbk.capi.library import BITCOINKERNEL_LIB" not in text:
+    text = text.replace(
+        "import ctypes\n",
+        "import ctypes\n\nfrom pbk.capi.library import BITCOINKERNEL_LIB\n",
+        1,
+    )
 
-# Clean up backup files
-rm -f "$FILE.bak"
+text = text.replace("_libraries['FIXME_STUB']", "BITCOINKERNEL_LIB")
+
+pattern = re.compile(
+    r"\n*class FunctionFactoryStub:.*?\nBITCOINKERNEL_LIB = FunctionFactoryStub\(\).*?\n",
+    re.S,
+)
+text, n = pattern.subn("\n\n", text, count=1)
+if n != 1:
+    raise SystemExit(f"expected to remove FunctionFactoryStub once, removed {n}")
+
+path.write_text(text)
+print(f"fixed {path}")
+PY
