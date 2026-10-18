@@ -2,14 +2,14 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <node/chainstate.h>
+#include <kernel/chainstate.h>
 
 #include <arith_uint256.h>
 #include <chain.h>
 #include <coins.h>
 #include <consensus/params.h>
 #include <kernel/caches.h>
-#include <node/blockstorage.h>
+#include <kernel/blockstorage.h>
 #include <sync.h>
 #include <tinyformat.h>
 #include <txdb.h>
@@ -34,7 +34,7 @@ using kernel::FlushResult;
 using kernel::Interrupted;
 using kernel::InterruptResult;
 
-namespace node {
+namespace kernel {
 // Complete initialization of chainstates after the initial call has been made
 // to ChainstateManager::InitializeChainstate().
 static FlushResult<InterruptResult, ChainstateLoadError> CompleteChainstateInitialization(
@@ -200,7 +200,7 @@ FlushResult<InterruptResult, ChainstateLoadError> LoadChainstate(ChainstateManag
                 chainman.m_blockman.GetPruneTarget() / 1_MiB);
     }
 
-    LOCK(cs_main);
+    WAIT_LOCK(cs_main, lock);
 
     chainman.m_total_coinstip_cache = cache_sizes.coins;
     chainman.m_total_coinsdb_cache = cache_sizes.coins_db;
@@ -236,9 +236,15 @@ FlushResult<InterruptResult, ChainstateLoadError> LoadChainstate(ChainstateManag
     // filesystem operations to move leveldb data directories around, and that seems
     // too risky to do in the middle of normal runtime.
     FlushResult<void, AbortFailure> snapshot_result;
-    auto snapshot_completion{assumeutxo_cs
-                             ? chainman.MaybeValidateSnapshot(validated_cs, *assumeutxo_cs, snapshot_result)
-                             : SnapshotCompletionResult::SKIPPED};
+    SnapshotCompletionResult snapshot_completion;
+    {
+        // MaybeValidateSnapshot must not run while cs_main is held (UTXO hash).
+        REVERSE_LOCK(lock, cs_main);
+        snapshot_completion = assumeutxo_cs
+                                  ? chainman.MaybeValidateSnapshot(validated_cs, *assumeutxo_cs, snapshot_result)
+                                  : SnapshotCompletionResult::SKIPPED;
+    }
+    NotifyFatalAbort(chainman.GetNotifications(), snapshot_result);
     // Ignore failure value, do not treat flush error as failure.
     snapshot_result >> result;
 
@@ -301,7 +307,11 @@ FlushResult<InterruptResult, ChainstateLoadError> VerifyLoadedChainstate(Chainst
                 *chainstate, chainman.GetConsensus(), chainstate->CoinsDB(),
                 options.check_level,
                 options.check_blocks) >> result};
-            if (verify_result) {
+            if (!verify_result) {
+                result.update({util::Error{_("Corrupted block database detected")}, ChainstateLoadError::FAILURE});
+            } else {
+                // Copy out of Result before visit. Avoids mingw -Wmaybe-uninitialized false positive.
+                const auto verify_outcome{*verify_result};
                 std::visit(util::Overloaded{
                     [&](VerifySuccess) {},
                     [&](SkippedMissingBlocks) {},
@@ -312,13 +322,11 @@ FlushResult<InterruptResult, ChainstateLoadError> VerifyLoadedChainstate(Chainst
                     },
                     [&](kernel::Interrupted) {
                        result.update(Interrupted{});
-                    }}, *verify_result);
-            } else {
-                result.update({util::Error{_("Corrupted block database detected")}, ChainstateLoadError::FAILURE});
+                    }}, verify_outcome);
             }
         }
     }
 
     return result;
 }
-} // namespace node
+} // namespace kernel

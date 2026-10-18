@@ -65,15 +65,29 @@ extern "C" {
 #endif // __cplusplus
 
 /**
+ * Public API version for libbitcoinkernel. Increment MAJOR for breaking ABI
+ * changes, MINOR for compatible additions, PATCH for fixes. Not yet a
+ * stability guarantee — breaking changes may still land before release.
+ */
+#define BITCOINKERNEL_API_VERSION_MAJOR 0
+#define BITCOINKERNEL_API_VERSION_MINOR 2
+#define BITCOINKERNEL_API_VERSION_PATCH 0
+#define BITCOINKERNEL_API_VERSION \
+    ((BITCOINKERNEL_API_VERSION_MAJOR * 10000) + \
+     (BITCOINKERNEL_API_VERSION_MINOR * 100) + \
+     (BITCOINKERNEL_API_VERSION_PATCH))
+
+/**
  * @page remarks Remarks
  *
  * @section purpose Purpose
  *
  * This header currently exposes an API for interacting with parts of Bitcoin
  * Core's consensus code. Users can validate blocks, iterate the block index,
- * read block and undo data from disk, and validate scripts. The header is
- * unversioned and not stable yet. Users should expect breaking changes. It is
- * also not yet included in releases of Bitcoin Core.
+ * read block and undo data from disk, and validate scripts. Version macros
+ * (`BITCOINKERNEL_API_VERSION_*`) track the C surface; the API is not yet
+ * stable for production. Breaking changes may still land. Not yet included in
+ * releases of Bitcoin Core.
  *
  * @section context Context
  *
@@ -223,7 +237,8 @@ typedef struct btck_ChainstateManagerOptions btck_ChainstateManagerOptions;
  * well as retrieving data from the chain. Internally it is a complex data
  * structure with diverse functionality.
  *
- * Its functionality will be more and more exposed in the future.
+ * More ChainstateManager surface is added as engine jobs are needed by
+ * external apps (not policy). See @ref btck_chainstate_manager_get_block_index_size.
  */
 typedef struct btck_ChainstateManager btck_ChainstateManager;
 
@@ -376,7 +391,7 @@ typedef uint8_t btck_Warning;
  * A collection of logging categories that may be encountered by kernel code.
  */
 typedef uint8_t btck_LogCategory;
-#define btck_LogCategory_ALL ((btck_LogCategory)(0)) //!< Not tied to a specific category, e.g. all INFO, WARNING and ERROR entries.
+#define btck_LogCategory_NONE ((btck_LogCategory)(0)) //!< Not tied to a specific category, e.g. most INFO, WARNING and ERROR entries.
 #define btck_LogCategory_BENCH ((btck_LogCategory)(1))
 #define btck_LogCategory_BLOCKSTORAGE ((btck_LogCategory)(2))
 #define btck_LogCategory_COINDB ((btck_LogCategory)(3))
@@ -408,7 +423,8 @@ typedef uint8_t btck_LogLevel;
  * accompanying *_len field to determine their length.
  */
 typedef struct {
-    //! Log message text.
+    //! Log message text. Not escaped, so it may contain newlines and other
+    //! control characters.
     const char* message;
     //! Length of message.
     size_t message_len;
@@ -438,11 +454,43 @@ typedef struct {
     btck_LogCategory category;
 } btck_LogEntry;
 
+/**
+ * Possible fatal error types issued by the kernel library. The numeric values
+ * are part of the API: new errors are appended, never inserted, so that
+ * existing values keep their meaning.
+ */
+typedef uint8_t btck_FatalError;
+#define btck_FatalError_ACTIVATE_BEST_CHAINS_FAILED ((btck_FatalError)(0))
+#define btck_FatalError_ASSUMEUTXO_DATA_NOT_FOUND ((btck_FatalError)(1))
+#define btck_FatalError_BLOCK_DISCONNECT_FAILED ((btck_FatalError)(2))
+#define btck_FatalError_BLOCK_FILE_CLOSE_FAILED ((btck_FatalError)(3))
+#define btck_FatalError_BLOCK_READ_FAILED ((btck_FatalError)(4))
+#define btck_FatalError_BLOCK_WRITE_FAILED ((btck_FatalError)(5))
+#define btck_FatalError_CORRUPT_BLOCK_FOUND ((btck_FatalError)(6))
+#define btck_FatalError_DISK_SPACE_TOO_LOW ((btck_FatalError)(7))
+#define btck_FatalError_SNAPSHOT_CHAINSTATE_DIR_REMOVAL_FAILED ((btck_FatalError)(8))
+#define btck_FatalError_SNAPSHOT_CHAINSTATE_RENAME_FAILED ((btck_FatalError)(9))
+#define btck_FatalError_SNAPSHOT_VALIDATION_FAILED ((btck_FatalError)(10))
+#define btck_FatalError_SYSTEM_ERROR_WHILE_FLUSHING ((btck_FatalError)(11))
+#define btck_FatalError_SYSTEM_ERROR_WHILE_LOADING_EXTERNAL_BLOCK_FILE ((btck_FatalError)(12))
+#define btck_FatalError_SYSTEM_ERROR_WHILE_SAVING_BLOCK ((btck_FatalError)(13))
+#define btck_FatalError_UNDO_DATA_WRITE_FAILED ((btck_FatalError)(14))
+#define btck_FatalError_UNDO_FILE_CLOSE_FAILED ((btck_FatalError)(15))
+
+/**
+ * Possible flush error types issued by the kernel library. As with
+ * btck_FatalError, new errors are appended rather than inserted.
+ */
+typedef uint8_t btck_FlushError;
+#define btck_FlushError_BLOCK_FILE_FLUSH_FAILED ((btck_FlushError)(0))
+#define btck_FlushError_UNDO_FILE_FLUSH_FAILED ((btck_FlushError)(1))
+
 /** Callback function types */
 
 /**
- * Function signature for the global logging callback. All bitcoin kernel
- * internal logs will pass through this callback.
+ * Function signature for a logging callback. Receives kernel log entries at or
+ * above the minimum level (see @ref btck_logging_set_min_level) while its
+ * btck_LoggingConnection exists.
  *
  * The callback may be invoked from any thread. Invocations are serialized: no
  * two invocations run at the same time, and destroying a btck_LoggingConnection
@@ -468,8 +516,8 @@ typedef void (*btck_NotifyHeaderTip)(void* user_data, btck_SynchronizationState 
 typedef void (*btck_NotifyProgress)(void* user_data, const char* title, size_t title_len, int progress_percent, int resume_possible);
 typedef void (*btck_NotifyWarningSet)(void* user_data, btck_Warning warning, const char* message, size_t message_len);
 typedef void (*btck_NotifyWarningUnset)(void* user_data, btck_Warning warning);
-typedef void (*btck_NotifyFlushError)(void* user_data, const char* message, size_t message_len);
-typedef void (*btck_NotifyFatalError)(void* user_data, const char* message, size_t message_len);
+typedef void (*btck_NotifyFlushError)(void* user_data, btck_FlushError error);
+typedef void (*btck_NotifyFatalError)(void* user_data, btck_FatalError error);
 
 /**
  * Function signatures for the validation interface.
@@ -482,7 +530,11 @@ typedef void (*btck_ValidationInterfaceBlockDisconnected)(void* user_data, btck_
 /**
  * Function signature for serializing data.
  *
- * Returns 0 to indicate success.
+ * @param[in] bytes    The data to write. Can be null if size is 0.
+ * @param[in] size     The number of bytes in the data.
+ * @param[in] userdata Holds the user-defined opaque structure that was given
+ *                     with the writer.
+ * @return             0 on success.
  */
 typedef int (*btck_WriteBytes)(const void* bytes, size_t size, void* userdata);
 
@@ -577,8 +629,10 @@ typedef struct {
     btck_NotifyProgress progress;           //!< Reports on current block synchronization progress.
     btck_NotifyWarningSet warning_set;      //!< A warning issued by the kernel library during validation.
     btck_NotifyWarningUnset warning_unset;  //!< A previous condition leading to the issuance of a warning is no longer given.
-    btck_NotifyFlushError flush_error;      //!< An error encountered when flushing data to disk.
-    btck_NotifyFatalError fatal_error;      //!< An unrecoverable system error encountered by the library.
+    btck_NotifyFlushError flush_error;      //!< An error encountered when flushing data to disk. The library reports the
+                                            //!< error type only; rendering it as a message is up to the user.
+    btck_NotifyFatalError fatal_error;      //!< An unrecoverable system error encountered by the library. The library
+                                            //!< reports the error type only; rendering it as a message is up to the user.
 } btck_NotificationInterfaceCallbacks;
 
 /**
@@ -1022,7 +1076,8 @@ BITCOINKERNEL_API void btck_logging_set_min_level(
  * @param[in] user_data_destroy_callback Nullable, function for freeing the user data. Not called
  *                                       if user_data is null.
  * @return                               A new kernel logging connection, or null on error. On error,
- *                                       user_data_destroy_callback is invoked if it is provided.
+ *                                       user_data_destroy_callback is invoked if both it and user_data
+ *                                       are non-null.
  */
 BITCOINKERNEL_API btck_LoggingConnection* BITCOINKERNEL_WARN_UNUSED_RESULT btck_logging_connection_create(
     btck_LogCallback log_callback,
@@ -1043,7 +1098,7 @@ BITCOINKERNEL_API void btck_logging_connection_destroy(btck_LoggingConnection* l
 
 /**
  * @brief Creates a chain parameters struct with default parameters based on the
- * passed in chain type.
+ * passed in chain type, including that chain's standard AssumeUTXO snapshots.
  *
  * @param[in] chain_type Controls the chain parameters type created.
  * @return               An allocated chain parameters opaque struct.
@@ -1400,6 +1455,45 @@ BITCOINKERNEL_API btck_ChainstateManager* BITCOINKERNEL_WARN_UNUSED_RESULT btck_
  * @return                       The btck_BlockTreeEntry, or null if no block headers have been loaded.
  */
 BITCOINKERNEL_API const btck_BlockTreeEntry* btck_chainstate_manager_get_best_entry(
+    const btck_ChainstateManager* chainstate_manager) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * @brief Number of block-index entries currently held by the chainstate manager.
+ *
+ * @param[in] chainstate_manager Non-null.
+ * @return                       Count of in-memory block tree entries.
+ */
+BITCOINKERNEL_API size_t btck_chainstate_manager_get_block_index_size(
+    const btck_ChainstateManager* chainstate_manager) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * @brief Height of the active chain tip.
+ *
+ * @param[in] chainstate_manager Non-null.
+ * @return                       Tip height, or -1 if the active chain has no tip.
+ */
+BITCOINKERNEL_API int32_t btck_chainstate_manager_get_tip_height(
+    const btck_ChainstateManager* chainstate_manager) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * @brief Block hash of the active chain tip.
+ *
+ * The returned hash is owned by the caller and must be destroyed with
+ * @ref btck_block_hash_destroy.
+ *
+ * @param[in] chainstate_manager Non-null.
+ * @return                       Owned tip hash, or null if the active chain has no tip.
+ */
+BITCOINKERNEL_API btck_BlockHash* BITCOINKERNEL_WARN_UNUSED_RESULT btck_chainstate_manager_get_tip_block_hash(
+    const btck_ChainstateManager* chainstate_manager) BITCOINKERNEL_ARG_NONNULL(1);
+
+/**
+ * @brief Whether the chainstate manager is in initial block download.
+ *
+ * @param[in] chainstate_manager Non-null.
+ * @return                       Non-zero if IBD is ongoing, zero otherwise.
+ */
+BITCOINKERNEL_API int btck_chainstate_manager_is_initial_block_download(
     const btck_ChainstateManager* chainstate_manager) BITCOINKERNEL_ARG_NONNULL(1);
 
 /**

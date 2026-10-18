@@ -87,10 +87,7 @@ BOOST_FIXTURE_TEST_CASE(baseindex_no_commit_ahead_of_flush, TestChain100Setup)
             BOOST_REQUIRE(index->Init());
             BOOST_CHECK_EQUAL(index->GetSummary().best_block_height, expected_commit_height);
 
-            // Drain in-flight validation callbacks before destroying the index.
-            m_node.chain->context()->validation_signals->SyncWithValidationInterfaceQueue();
-            // shutdown sequence (c.f. Shutdown() in init.cpp)
-            index->Stop();
+            StopIndex(*index, m_node);
         };
 
         // Part 1: Sync, then "crash" (stop without flushing). Models a node that
@@ -143,7 +140,8 @@ BOOST_FIXTURE_TEST_CASE(index_unclean_shutdown, TestChain100Setup)
                     BOOST_CHECK(CheckBlock(block, state, params.GetConsensus()));
                 }
                 FlushResult<void, AbortFailure> accept_result;
-                BOOST_CHECK(m_node.chainman->AcceptBlock(new_block, state, accept_result, &new_block_index, true, nullptr, nullptr, true));
+                WITH_LOCK(cs_main, m_node.chainman->MarkBlockForStorage(new_block->GetHash()));
+                BOOST_CHECK(m_node.chainman->AcceptBlock(new_block, state, accept_result, &new_block_index, nullptr, nullptr, true));
                 BOOST_CHECK(accept_result);
                 {
                     LOCK(cs_main);
@@ -246,10 +244,7 @@ BOOST_FIXTURE_TEST_CASE(index_reorg_crash, TestChain100Setup)
     // Wait for the index to reach the new tip
     func_wait_until(blocking_height + 2, 5s);
 
-    // Drain unused BlockConnected events, to avoid unsafe memory races during destruction
-    m_node.chain->context()->validation_signals->SyncWithValidationInterfaceQueue();
-    // shutdown sequence (c.f. Shutdown() in init.cpp)
-    index.Stop();
+    StopIndex(index, m_node);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

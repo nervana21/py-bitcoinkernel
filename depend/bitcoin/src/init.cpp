@@ -21,7 +21,6 @@
 #include <compat/compat.h>
 #include <consensus/params.h>
 #include <crypto/hex_base.h>
-#include <dbwrapper.h>
 #include <httprpc.h>
 #include <httpserver.h>
 #include <index/base.h>
@@ -35,12 +34,14 @@
 #include <interfaces/ipc.h>
 #include <interfaces/node.h>
 #include <ipc/exception.h>
+#include <ipc/types.h>
 #include <kernel/blockmanager_opts.h>
 #include <kernel/blocktreestorage.h>
 #include <kernel/caches.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <kernel/checks.h>
 #include <kernel/context.h>
+#include <kernel/mempool_interface.h>
 #include <kernel/notifications_interface.h>
 #include <kernel/result.h>
 #include <key.h>
@@ -55,6 +56,7 @@
 #include <node/block_template_manager.h>
 #include <node/blockmanager_args.h>
 #include <node/blockstorage.h>
+#include <node/blocktree_migration.h>
 #include <node/caches.h>
 #include <node/chainstate.h>
 #include <node/chainstatemanager_args.h>
@@ -154,7 +156,7 @@ using common::ResolveErrMsg;
 using kernel::FlushResult;
 using kernel::InterruptResult;
 using node::ApplyArgsManOptions;
-using node::BlockManager;
+using kernel::BlockManager;
 using node::CalculateCacheSizes;
 using node::ChainstateLoadError;
 using node::DEFAULT_PERSIST_MEMPOOL;
@@ -166,6 +168,7 @@ using node::KernelMempool;
 using node::KernelNotifications;
 using node::LoadChainstate;
 using node::LoadMempool;
+using node::MaybeMigrateLegacyBlockTree;
 using node::MempoolPath;
 using node::NodeContext;
 using node::ShouldPersistMempool;
@@ -540,11 +543,6 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
         MAX_SCRIPTCHECK_THREADS, DEFAULT_SCRIPTCHECK_THREADS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-prevoutfetchthreads=<n>", strprintf("Set the number of threads used to prefetch block input prevouts from the chainstate database (0 disables, up to %d, default: %d). Negative values are rejected.", MAX_PREVOUTFETCH_THREADS, DEFAULT_PREVOUTFETCH_THREADS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-persistmempool", strprintf("Whether to save the mempool on shutdown and load on restart (default: %u)", DEFAULT_PERSIST_MEMPOOL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-persistmempoolv1",
-                   strprintf("Whether a mempool.dat file created by -persistmempool or the savemempool RPC will be written in the legacy format "
-                             "(version 1) or the current format (version 2). This temporary option will be removed in the future. (default: %u)",
-                             DEFAULT_PERSIST_V1_DAT),
-                   ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pid=<file>", strprintf("Specify pid file. Relative paths will be prefixed by a net-specific datadir location. (default: %s)", BITCOIN_PID_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-prune=<n>", strprintf("Reduce storage requirements by enabling pruning (deleting) of old blocks. This allows the pruneblockchain RPC to be called to delete specific blocks and enables automatic pruning of old blocks if a target size in MiB is provided. This mode is incompatible with -txindex. "
             "Warning: Reverting this setting requires re-downloading the entire blockchain. Wallets and indexes should be loaded at startup and kept active while pruning is enabled so they stay synchronized before old block data is deleted; wallets or indexes that fall behind pruned data may require a reindex. "
@@ -757,7 +755,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-rpcworkqueue=<n>", strprintf("Set the maximum depth of the work queue to service RPC calls (default: %d)", DEFAULT_HTTP_WORKQUEUE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::RPC);
     argsman.AddArg("-server", "Accept command line and JSON-RPC commands", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     if (can_listen_ipc) {
-        argsman.AddArg("-ipcbind=<address>", "Bind to Unix socket address and listen for incoming connections. Valid address values are \"unix\" to listen on the default path, <datadir>/node.sock, or \"unix:/custom/path\" to specify a custom path. Can be specified multiple times to listen on multiple paths. Default behavior is not to listen on any path. If relative paths are specified, they are interpreted relative to the network data directory. If paths include any parent directory components and the parent directories do not exist, they will be created. Enabling this gives local processes that can access the socket unauthenticated RPC access, so it's important to choose a path with secure permissions if customizing this.", ArgsManager::ALLOW_ANY, OptionsCategory::IPC);
+        argsman.AddArg("-ipcbind=<address>", strprintf("Bind to Unix socket address and listen for incoming connections. Valid address values are \"unix\" to listen on the default path, <datadir>/node.sock, or \"unix:/custom/path\" to specify a custom path. Append \",max-connections=8\", for example \"unix:/custom/path,max-connections=8\", to limit the number of simultaneous connections on that address (default: %d, maximum: %d). Can be specified multiple times to listen on multiple paths. Default behavior is not to listen on any path. If relative paths are specified, they are interpreted relative to the network data directory. If paths include any parent directory components and the parent directories do not exist, they will be created. Enabling this gives local processes that can access the socket unauthenticated RPC access, so it's important to choose a path with secure permissions if customizing this.",ipc::DEFAULT_MAX_CONNECTIONS, ipc::MAX_CONNECTIONS), ArgsManager::ALLOW_ANY, OptionsCategory::IPC);
     }
 
 #if HAVE_DECL_FORK
@@ -1065,6 +1063,9 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     // Make sure enough file descriptors are available. We need to reserve enough FDs to account for the bare minimum,
     // plus all manual connections and all bound interfaces. Any remainder will be available for connection sockets
 
+    // Keep IPC reservations low enough to leave room for core and P2P file descriptor reservations.
+    constexpr size_t MAX_IPC_FDS{ipc::MAX_CONNECTIONS + 1};
+
     // Number of bound interfaces (we have at least one)
     int num_p2p_bind = std::max(num_user_p2p_bind, size_t(1));
     // Maximum number of connections with other nodes, this accounts for all types of outbounds and inbounds except for manual
@@ -1072,10 +1073,38 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     if (user_p2p_max_connections < 0) {
         return InitError(Untranslated("-maxconnections must be greater or equal than zero"));
     }
+
+    // Reserve one listening socket per -ipcbind address plus its accepted
+    // connection slots. Unlike P2P, IPC has no default listener.
+    size_t ipc_addresses{0};
+    size_t ipc_max_connections{0};
+    for (const std::string& configured_address : args.GetArgs("-ipcbind")) {
+        auto listen_address{interfaces::Ipc::parseListenAddress(configured_address)};
+        if (!listen_address) {
+            return InitError(Untranslated(strprintf("Invalid -ipcbind address '%s': %s", configured_address, util::ErrorString(listen_address).original)));
+        }
+        // Check the aggregate after adding this listener so multiple
+        // individually valid -ipcbind values cannot exceed the IPC FD cap.
+        ipc_addresses += 1;
+        ipc_max_connections += listen_address->max_connections;
+    }
+    // Actual number of IPC file descriptors to be reserved.
+    const size_t ipc_fds{ipc_max_connections + ipc_addresses};
+
+    if (ipc_fds > MAX_IPC_FDS) {
+        return InitError(Untranslated(strprintf("Too many IPC file descriptors requested: %d -ipcbind listeners and connection slots exceed the limit of %d. Reduce the number of -ipcbind addresses or their max-connections values", static_cast<int>(ipc_fds), static_cast<int>(MAX_IPC_FDS))));
+    }
+
+    if (ipc_addresses > 0) {
+        LogInfo("Reserving %d file descriptors for IPC (%d listening sockets, %d connection slots)",
+                static_cast<int>(ipc_fds),
+                static_cast<int>(ipc_addresses),
+                static_cast<int>(ipc_max_connections));
+    }
+
     const size_t max_private{args.GetBoolArg("-privatebroadcast", DEFAULT_PRIVATE_BROADCAST)
                              ? MAX_PRIVATE_BROADCAST_CONNECTIONS
                              : 0};
-
     // HTTP server listen sockets: by default two (IPv4 and IPv6 loopback), or one per -rpcbind entry
     int num_rpc_bind = std::max(args.GetArgs("-rpcbind").size(), size_t(2));
     // HTTP server connected client sockets
@@ -1097,11 +1126,12 @@ bool AppInitParameterInteraction(const ArgsManager& args)
                               num_rpc_bind +
                               user_rpc_max_connections +
                               user_p2p_max_connections +
+                              static_cast<int64_t>(ipc_fds) +
                               static_cast<int64_t>(max_private);
     if (total_fds > std::numeric_limits<int>::max()) {
         return InitError(Untranslated("Too many file descriptors requested. Try lower values for -rpcmaxconnections "
                                       "or -maxconnections, or fewer settings of "
-                                      "-rpcbind, -bind and -whitebind"));
+                                      "-rpcbind, -bind, -whitebind and -ipcbind"));
     }
 
     // Subset of total_fds must also be a safe int
@@ -1109,7 +1139,8 @@ bool AppInitParameterInteraction(const ArgsManager& args)
                            MAX_ADDNODE_CONNECTIONS +
                            num_p2p_bind +
                            num_rpc_bind +
-                           user_rpc_max_connections;
+                           user_rpc_max_connections +
+                           static_cast<int>(ipc_fds);
 
     // Try raising the FD limit to what the user wants (available_fds may be smaller than the requested amount if this fails)
     available_fds = RaiseFileDescriptorLimit(static_cast<int>(total_fds));
@@ -1416,25 +1447,26 @@ FlushResult<kernel::InterruptResult, ChainstateLoadError> InitAndLoadChainstate(
     };
     Assert(ApplyArgsManOptions(args, blockman_opts)); // no error can happen, already checked in AppInitParameterInteraction
 
-    // Creating the chainstate manager internally creates a BlockManager, opens
-    // the blocks tree db, and wipes existing block files in case of a reindex.
-    // The coinsdb is opened at a later point on LoadChainstate.
+    // LevelDB block-tree content migration is node-only (links LevelDB). Must
+    // run before BlockManager opens BlockTreeStore in the kernel.
     Assert(!node.chainman); // Was reset above
     try {
-        node.chainman = std::make_unique<ChainstateManager>(LogInstance(), *Assert(node.shutdown_signal), chainman_opts, blockman_opts);
+        MaybeMigrateLegacyBlockTree(
+            LogInstance(),
+            blockman_opts.block_tree_dir,
+            chainparams.GetConsensus(),
+            *Assert(node.shutdown_signal),
+            blockman_opts.wipe_block_tree_data,
+            blockman_opts.read_only);
     } catch (kernel::BlockTreeStoreError& e) {
         LogError("%s", e.what());
         return {util::Error{_("Error opening block database")}, ChainstateLoadError::FAILURE};
-    } catch (std::exception& e) {
-        return {util::Error{Untranslated(strprintf("Failed to initialize ChainstateManager: %s", e.what()))}, ChainstateLoadError::FAILURE_FATAL};
     }
-    ChainstateManager& chainman = *node.chainman;
-    if (chainman.m_interrupt) return kernel::Interrupted{};
 
-    // This is defined and set here instead of inline in validation.h to avoid a hard
-    // dependency between validation and index/base, since the latter is not in
-    // libbitcoinkernel.
-    chainman.m_target_block_reached = [&node]() {
+    // Node-only assumeutxo hook: restart indexes / services when the historical
+    // chainstate hits the snapshot target. Kept on Options so kernel never
+    // depends on index/base; empty for pure kernel consumers.
+    chainman_opts.target_block_reached = [&node]() {
         if (!node.chainman->m_blockman.IsPruneMode()) {
             LogInfo("[snapshot] re-enabling NODE_NETWORK services");
             node.connman->AddLocalServices(NODE_NETWORK);
@@ -1451,6 +1483,20 @@ FlushResult<kernel::InterruptResult, ChainstateLoadError> InitAndLoadChainstate(
             }
         }
     };
+
+    // Creating the chainstate manager internally creates a BlockManager, opens
+    // the blocks tree db, and wipes existing block files in case of a reindex.
+    // The coinsdb is opened at a later point on LoadChainstate.
+    try {
+        node.chainman = std::make_unique<ChainstateManager>(LogInstance(), *Assert(node.shutdown_signal), chainman_opts, blockman_opts);
+    } catch (kernel::BlockTreeStoreError& e) {
+        LogError("%s", e.what());
+        return {util::Error{_("Error opening block database")}, ChainstateLoadError::FAILURE};
+    } catch (std::exception& e) {
+        return {util::Error{Untranslated(strprintf("Failed to initialize ChainstateManager: %s", e.what()))}, ChainstateLoadError::FAILURE_FATAL};
+    }
+    ChainstateManager& chainman = *node.chainman;
+    if (chainman.m_interrupt) return kernel::Interrupted{};
     node::ChainstateLoadOptions options;
     options.mempool = Assert(node.mempool.get());
     options.wipe_chainstate_db = do_reindex || do_reindex_chainstate;
@@ -1574,13 +1620,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     uiInterface.InitWallet();
 
     if (interfaces::Ipc* ipc = node.init->ipc()) {
-        for (std::string address : gArgs.GetArgs("-ipcbind")) {
+        for (const std::string& configured_address : gArgs.GetArgs("-ipcbind")) {
+            auto listen_address{interfaces::Ipc::parseListenAddress(configured_address)};
+            Assert(listen_address); // Already validated in AppInitParameterInteraction.
             try {
-                ipc->listenAddress(address);
+                ipc->listenAddress(*listen_address);
             } catch (const std::exception& e) {
-                return InitError(Untranslated(strprintf("Unable to bind to IPC address '%s'. %s", address, e.what())));
+                return InitError(Untranslated(strprintf("Unable to bind to IPC address '%s'. %s", listen_address->address, e.what())));
             }
-            LogInfo("Listening for IPC requests on address %s", address);
+            LogInfo("Listening for IPC requests on address %s", listen_address->address);
         }
     }
 
@@ -2119,8 +2167,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
         // Start indexes initial sync
         if (!StartIndexBackgroundSync(node)) {
-            bilingual_str err_str = _("Failed to start indexes, shutting down…");
-            chainman.GetNotifications().fatalError(err_str);
+            node.notifications->abort(_("Failed to start indexes, shutting down…"));
             return;
         }
         // Load mempool from disk

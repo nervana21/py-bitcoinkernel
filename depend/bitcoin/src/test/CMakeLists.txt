@@ -59,6 +59,7 @@ add_executable(test_bitcoin
   i2p_tests.cpp
   interfaces_tests.cpp
   key_io_tests.cpp
+  kernel_error_tests.cpp
   key_tests.cpp
   logging_tests.cpp
   mempool_tests.cpp
@@ -130,6 +131,7 @@ add_executable(test_bitcoin
   txvalidationcache_tests.cpp
   uint256_tests.cpp
   util_check_tests.cpp
+  util_not_null_tests.cpp
   util_expected_tests.cpp
   util_string_tests.cpp
   util_tests.cpp

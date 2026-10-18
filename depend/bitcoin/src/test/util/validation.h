@@ -17,8 +17,9 @@
 #include <vector>
 
 namespace node {
-class BlockManager;
+struct NodeContext;
 }
+class BaseIndex;
 class CValidationInterface;
 class FakeNodeClock;
 struct TestingSetup;
@@ -32,7 +33,7 @@ public:
     size_t size() override { return 0; }
 };
 
-struct TestBlockManager : public node::BlockManager {
+struct TestBlockManager : public kernel::BlockManager {
     /** Test-only method to clear internal state for fuzzing */
     void CleanupForFuzzing() NO_THREAD_SAFETY_ANALYSIS;
 };
@@ -61,6 +62,13 @@ public:
         const CBlockIndex* pindex);
 };
 
-std::vector<std::pair<COutPoint, CAmount>> ResetChainmanAndMempool(TestingSetup& setup, FakeNodeClock& node_clock);
+struct ResetOptions {
+    bool init_block_filter_basic{false};
+};
+
+std::vector<std::pair<COutPoint, CAmount>> ResetChainmanAndMempool(TestingSetup& setup, FakeNodeClock& node_clock, const ResetOptions& opts = {});
+
+/// Drain validation callbacks before stopping an index, matching Shutdown() in init.cpp.
+void StopIndex(BaseIndex& index, node::NodeContext& node);
 
 #endif // BITCOIN_TEST_UTIL_VALIDATION_H

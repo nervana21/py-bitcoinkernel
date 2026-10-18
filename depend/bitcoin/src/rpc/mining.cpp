@@ -26,6 +26,7 @@
 #include <netbase.h>
 #include <node/block_template_manager.h>
 #include <node/blockstorage.h>
+#include <node/block_validation_state_catcher.h>
 #include <node/context.h>
 #include <node/miner.h>
 #include <node/mining_args.h>
@@ -1074,24 +1075,6 @@ static RPCMethod getblocktemplate()
     };
 }
 
-class submitblock_StateCatcher final : public CValidationInterface
-{
-public:
-    uint256 hash;
-    bool found{false};
-    BlockValidationState state;
-
-    explicit submitblock_StateCatcher(const uint256 &hashIn) : hash(hashIn), state() {}
-
-protected:
-    void BlockChecked(const std::shared_ptr<const CBlock>& block, const BlockValidationState& stateIn) override
-    {
-        if (block->GetHash() != hash) return;
-        found = true;
-        state = stateIn;
-    }
-};
-
 static RPCMethod submitblock()
 {
     // We allow 2 arguments for compliance with BIP22. Argument 2 is ignored.
@@ -1130,7 +1113,7 @@ static RPCMethod submitblock()
     }
 
     bool new_block;
-    auto sc = std::make_shared<submitblock_StateCatcher>(block.GetHash());
+    auto sc = std::make_shared<node::BlockValidationStateCatcher>(block.GetHash());
     CHECK_NONFATAL(chainman.m_options.signals)->RegisterSharedValidationInterface(sc);
     FlushResult<void, AbortFailure> process_result;
     bool accepted = chainman.ProcessNewBlock(blockptr, /*force_processing=*/true, /*min_pow_checked=*/true, /*new_block=*/&new_block, process_result);
@@ -1138,10 +1121,10 @@ static RPCMethod submitblock()
     if (!new_block && accepted) {
         return "duplicate";
     }
-    if (!sc->found) {
+    if (!sc->m_state) {
         return "inconclusive";
     }
-    return BIP22ValidationResult(sc->state);
+    return BIP22ValidationResult(*sc->m_state);
 },
     };
 }

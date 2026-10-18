@@ -6,6 +6,7 @@
 #define BITCOIN_DBWRAPPER_H
 
 #include <attributes.h>
+#include <kernel/db_options.h>
 #include <serialize.h>
 #include <span.h>
 #include <streams.h>
@@ -14,6 +15,7 @@
 #include <util/expected.h>
 #include <util/fs.h>
 #include <util/log.h>
+#include <util/not_null.h>
 #include <util/obfuscation.h>
 
 #include <cstddef>
@@ -32,12 +34,6 @@ class Env;
 inline constexpr size_t DBWRAPPER_PREALLOC_KEY_SIZE = 64;
 inline constexpr size_t DBWRAPPER_PREALLOC_VALUE_SIZE = 1024;
 inline constexpr size_t DBWRAPPER_MAX_FILE_SIZE{32_MiB};
-
-//! User-controlled performance and debug options.
-struct DBOptions {
-    //! Compact database on startup.
-    bool force_compact = false;
-};
 
 //! Application-specific storage settings.
 struct DBParams {
@@ -201,7 +197,7 @@ protected:
 
 private:
     //! holds all leveldb-specific fields of this class
-    std::unique_ptr<LevelDBContext> m_db_context;
+    util::NotNullUniquePtr<LevelDBContext> m_db_context;
 
     //! the name of this database
     std::string m_name;
@@ -215,7 +211,7 @@ private:
     std::optional<std::string> ReadImpl(std::span<const std::byte> key) const;
     bool ExistsImpl(std::span<const std::byte> key) const;
     size_t EstimateSizeImpl(std::span<const std::byte> key1, std::span<const std::byte> key2) const;
-    auto& DBContext() const LIFETIMEBOUND { return *Assert(m_db_context); }
+    auto& DBContext() const LIFETIMEBOUND { return *m_db_context; }
 
 public:
     CDBWrapper(util::log::Logger& logger, const DBParams& params);

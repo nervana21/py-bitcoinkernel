@@ -6,11 +6,12 @@
 #define BITCOIN_KERNEL_COINSSTORE_H
 
 #include <coins.h>
+#include <primitives/transaction.h>
 #include <sync.h>
 #include <uint256.h>
 #include <util/fs.h>
 
-#include <cstdint>
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <optional>
@@ -18,8 +19,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
-class COutPoint;
 
 namespace kernel {
 
@@ -52,6 +51,9 @@ public:
 
     CoinsStore(const fs::path& path, Mode mode);
     ~CoinsStore();
+
+    //! Remove store files under dir (data, log, lock files). Does not remove the directory.
+    static void RemoveFiles(const fs::path& dir);
 
     std::optional<Coin> GetCoin(const COutPoint& outpoint) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     bool HaveCoin(const COutPoint& outpoint) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
