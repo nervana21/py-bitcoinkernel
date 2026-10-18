@@ -24,6 +24,7 @@
 #include <txgraph.h>
 #include <util/feefrac.h>
 #include <util/hasher.h>
+#include <util/not_null.h>
 #include <util/result.h>
 
 #include <boost/multi_index/hashed_index.hpp>
@@ -45,7 +46,10 @@
 #include <vector>
 
 class CChain;
+namespace kernel {
 class Chainstate;
+} // namespace kernel
+using kernel::Chainstate;
 class ValidationSignals;
 class DisconnectedBlockTransactions;
 
@@ -58,7 +62,7 @@ inline constexpr uint64_t ACCEPTABLE_COST = 75'000;
 /** How many linearization iterations required for TxGraph clusters to have
  * "acceptable" quality, if they cannot be optimally linearized with fewer
  * iterations. */
-static constexpr uint64_t ACCEPTABLE_ITERS = 1'700;
+inline constexpr uint64_t ACCEPTABLE_ITERS = 1'700;
 
 /** How much work we ask TxGraph to do after a mempool change occurs (either
  * due to a changeset being applied, a new block being found, or a reorg). */
@@ -772,10 +776,11 @@ public:
         friend class CTxMemPool;
     };
 
-    std::unique_ptr<ChangeSet> GetChangeSet() EXCLUSIVE_LOCKS_REQUIRED(cs) {
+    util::NotNullUniquePtr<ChangeSet> GetChangeSet() EXCLUSIVE_LOCKS_REQUIRED(cs)
+    {
         Assume(!m_have_changeset);
         m_have_changeset = true;
-        return std::make_unique<ChangeSet>(this);
+        return util::NotNull{std::make_unique<ChangeSet>(this)};
     }
 
     bool m_have_changeset GUARDED_BY(cs){false};

@@ -4,7 +4,6 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <rpc/mempool.h>
-#include <rpc/register.h> // IWYU pragma: associated
 
 #include <common/args.h>
 #include <consensus/amount.h>
@@ -21,11 +20,13 @@
 #include <node/txorphanage.h>
 #include <node/types.h>
 #include <policy/feerate.h>
+#include <policy/mempool_accept_result.h>
 #include <policy/packages.h>
 #include <policy/policy.h>
 #include <policy/rbf.h>
 #include <primitives/transaction.h>
 #include <rpc/protocol.h>
+#include <rpc/register.h> // IWYU pragma: associated
 #include <rpc/request.h>
 #include <rpc/server.h>
 #include <rpc/server_util.h>
@@ -398,11 +399,11 @@ static RPCMethod testmempoolaccept()
             const PackageMempoolAcceptResult package_result = [&] {
                 if (txns.size() > 1) {
                     auto [mempool_accept, flush_result]{ProcessNewPackage(chainstate, mempool, txns, /*test_accept=*/true, /*client_maxfeerate=*/{})};
-                    Assert(flush_result);
+                    CHECK_NONFATAL(flush_result);
                     return mempool_accept;
                 }
                 auto [mempool_accept, flush_result]{ProcessTransaction(txns[0], node, /*test_accept=*/true)};
-                Assert(flush_result);
+                CHECK_NONFATAL(flush_result);
                 return PackageMempoolAcceptResult(txns[0]->GetWitnessHash(), mempool_accept);
             }();
 
@@ -1481,7 +1482,7 @@ static RPCMethod submitpackage()
             CTxMemPool& mempool = EnsureMemPool(node);
             Chainstate& chainstate = EnsureChainman(node).ActiveChainstate();
             auto [package_result, flush_result]{ProcessNewPackage(chainstate, mempool, txns, /*test_accept=*/ false, client_maxfeerate)};
-            Assert(flush_result);
+            CHECK_NONFATAL(flush_result);
 
             std::string package_msg = "success";
 

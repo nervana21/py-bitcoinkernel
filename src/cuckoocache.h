@@ -489,8 +489,9 @@ public:
     }
 
     /** Empty the cache and re-run setup(). */
-    void TestOnlyReset()
+    void TestOnlyReset() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
     {
+        LOCK(m_mutex);
         table.clear();
         epoch_flags.clear();
         setup(0);

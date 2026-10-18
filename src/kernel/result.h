@@ -5,8 +5,12 @@
 #ifndef BITCOIN_KERNEL_RESULT_H
 #define BITCOIN_KERNEL_RESULT_H
 
+#include <kernel/error.h>
+
 #include <util/messages.h>
 #include <util/result.h>
+
+#include <optional>
 
 //! @file Kernel result types for use with util::Result.
 //!
@@ -16,11 +20,12 @@
 //!
 //! Ideally, low level functions would not trigger flushes and shutdowns at all,
 //! but would just return information so higher level code can determine when to
-//! flush and shut down. However, implementing this would require significant
-//! restructuring of code and probably change external behavior. In the
-//! meantime, FlushStatus and AbortFailure result types below can be used to
-//! provide a consistent indication to callers of when shutdowns and flushes are
-//! triggered, and which functions can and cannot trigger them.
+//! flush and shut down. Progress toward that: AcceptBlock no longer flushes
+//! (MaybePruneBlockFilesAfterAccept); tip/connect paths use
+//! MaybeFlushChainstateIfNeeded / MaybeFlushChainstatePeriodic on
+//! ChainstateManager; flush and engine helpers record AbortFailure without
+//! notifying. API boundaries call NotifyFatalAbort (clears payload). Meantime,
+//! FlushStatus and AbortFailure mark which calls can flush or abort.
 
 namespace kernel {
 //! Result type for functions that might trigger flushes, indicating whether
@@ -28,9 +33,11 @@ namespace kernel {
 enum class FlushStatus { SKIPPED, SUCCESS, FAILURE };
 
 //! Result type for functions that might trigger fatal errors and need to abort
-//! the node, indicating whether a fatal error did occur.
+//! the node. `error` carries the typed fatal so callers can NotifyFatalAbort
+//! without the deep layer calling Notifications::fatalError itself.
 struct AbortFailure {
     bool fatal{false};
+    std::optional<FatalError> error{};
 };
 
 template <typename SuccessType = void, typename FailureType = void>
@@ -60,6 +67,7 @@ struct ResultTraits<kernel::AbortFailure>
     static void update(kernel::AbortFailure& dst, kernel::AbortFailure&& src)
     {
         dst.fatal |= src.fatal;
+        if (src.error) dst.error = std::move(src.error);
     }
 };
 } // namespace util

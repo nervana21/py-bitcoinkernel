@@ -4,7 +4,6 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <rpc/blockchain.h>
-#include <rpc/register.h> // IWYU pragma: associated
 
 #include <arith_uint256.h>
 #include <blockfilter.h>
@@ -21,6 +20,7 @@
 #include <crypto/hex_base.h>
 #include <dbwrapper.h>
 #include <deploymentinfo.h>
+#include <deploymentstatus.h>
 #include <flatfile.h>
 #include <index/base.h>
 #include <index/blockfilterindex.h>
@@ -43,6 +43,7 @@
 #include <protocol.h>
 #include <rpc/protocol.h>
 #include <rpc/rawtransaction_util.h>
+#include <rpc/register.h> // IWYU pragma: associated
 #include <rpc/request.h>
 #include <rpc/server.h>
 #include <rpc/server_util.h>
@@ -102,7 +103,7 @@ using kernel::CCoinsStats;
 using kernel::CoinStatsHashType;
 
 using interfaces::BlockRef;
-using node::BlockManager;
+using kernel::BlockManager;
 using node::NodeContext;
 using node::SnapshotMetadata;
 using util::MakeUnorderedList;
@@ -1023,7 +1024,7 @@ CoinStatsHashType ParseHashType(std::string_view hash_type_input)
  *
  * @param[in] index_requested Signals if the coinstatsindex should be used (when available).
  */
-static std::optional<kernel::CCoinsStats> GetUTXOStats(const CCoinsViewDB& view, node::BlockManager& blockman,
+static std::optional<kernel::CCoinsStats> GetUTXOStats(const CCoinsViewDB& view, kernel::BlockManager& blockman,
                                                        kernel::CoinStatsHashType hash_type,
                                                        const std::function<void()>& interruption_point = {},
                                                        const CBlockIndex* pindex = nullptr,

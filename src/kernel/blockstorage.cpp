@@ -2,7 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <node/blockstorage.h>
+#include <kernel/blockstorage.h>
 
 #include <arith_uint256.h>
 #include <chain.h>
@@ -13,6 +13,8 @@
 #include <kernel/blockmanager_opts.h>
 #include <kernel/blocktreestorage.h>
 #include <kernel/chainparams.h>
+#include <kernel/error.h>
+#include <kernel/legacy_leveldb.h>
 #include <kernel/messagestartchars.h>
 #include <kernel/notifications_interface.h>
 #include <kernel/types.h>
@@ -62,7 +64,7 @@ using kernel::InterruptResult;
 
 #define LOG_REQUIRE_CONTEXT true
 
-namespace node {
+namespace kernel {
 
 bool CBlockIndexWorkComparator::operator()(const CBlockIndex* pa, const CBlockIndex* pb) const
 {
@@ -367,9 +369,10 @@ util::Result<InterruptResult, AbortFailure> BlockManager::LoadBlockIndexData(con
     if (snapshot_blockhash) {
         const std::optional<AssumeutxoData> maybe_au_data = GetParams().AssumeutxoForBlockhash(*snapshot_blockhash);
         if (!maybe_au_data) {
-            auto error{strprintf(_("Assumeutxo data not found for the given blockhash '%s'."), snapshot_blockhash->ToString())};
-            m_opts.notifications.fatalError(error);
-            return {util::Error{std::move(error)}, AbortFailure{.fatal = true}};
+            util::Result<InterruptResult, AbortFailure> fatal_result;
+            RecordFatalAbort(/*state=*/nullptr, fatal_result, kernel::AssumeutxoDataNotFound{*snapshot_blockhash});
+            NotifyFatalAbort(m_opts.notifications, fatal_result);
+            return fatal_result;
         }
         const AssumeutxoData& au_data = *Assert(maybe_au_data);
         m_snapshot_height = au_data.height;
@@ -688,7 +691,7 @@ FlushResult<> BlockManager::FlushUndoFile(int block_file, bool finalize)
     FlatFilePos undo_pos_old(block_file, m_blockfile_info[block_file].nUndoSize);
     if (!m_undo_store->Flush(undo_pos_old, finalize)) {
         auto error{_("Flushing undo file to disk failed. This is likely the result of an I/O error.")};
-        m_opts.notifications.flushError(error);
+        m_opts.notifications.flushError(kernel::FlushError::UNDO_FILE_FLUSH_FAILED);
         result.update(util::Error{std::move(error)});
         result.update(util::Info{FlushStatus::FAILURE});
     } else {
@@ -714,7 +717,7 @@ FlushResult<> BlockManager::FlushBlockFile(int blockfile_num, bool fFinalize, bo
     FlatFilePos block_pos_old(blockfile_num, m_blockfile_info[blockfile_num].nSize);
     if (!m_block_store->Flush(block_pos_old, fFinalize)) {
         auto error{_("Flushing block file to disk failed. This is likely the result of an I/O error.")};
-        m_opts.notifications.flushError(error);
+        m_opts.notifications.flushError(kernel::FlushError::BLOCK_FILE_FLUSH_FAILED);
         result.update(util::Error{std::move(error)});
         result.update(util::Info{FlushStatus::FAILURE});
     } else {
@@ -868,9 +871,7 @@ FlushResult<FlatFilePos, AbortFailure> BlockManager::FindNextBlockPos(unsigned i
     bool out_of_space;
     size_t bytes_allocated = m_block_file_seq.Allocate(pos, nAddSize, out_of_space);
     if (out_of_space) {
-        auto error{_("Disk space is too low!")};
-        m_opts.notifications.fatalError(error);
-        result.update({util::Error{std::move(error)}, AbortFailure{.fatal = true}});
+        RecordFatalAbort(/*state=*/nullptr, result, kernel::DiskSpaceTooLow{});
         return result;
     }
     if (bytes_allocated != 0 && IsPruneMode()) {
@@ -917,9 +918,9 @@ util::Result<void, AbortFailure> BlockManager::FindUndoPos(BlockValidationState&
     bool out_of_space;
     size_t bytes_allocated = m_undo_store->Allocate(pos, nAddSize, out_of_space);
     if (out_of_space) {
-        auto error{_("Disk space is too low!")};
-        FatalError(m_opts.notifications, state, error);
-        return {util::Error{std::move(error)}, AbortFailure{.fatal = true}};
+        util::Result<void, AbortFailure> fatal_result;
+        RecordFatalAbort(&state, fatal_result, kernel::DiskSpaceTooLow{});
+        return fatal_result;
     }
     if (bytes_allocated != 0 && IsPruneMode()) {
         m_check_for_pruning = true;
@@ -951,9 +952,7 @@ FlushResult<void, AbortFailure> BlockManager::WriteBlockUndo(const CBlockUndo& b
         auto writer{PolymorphicWriterWrapper{m_undo_store->MakeBlockStorageWriter(pos)}};
         if (!writer.IsValid()) {
             LogError(m_log, "OpenUndoFile failed for %s while writing block undo", pos.ToString());
-            auto error{_("Failed to write undo data.")};
-            FatalError(m_opts.notifications, state, error);
-            result.update({util::Error{std::move(error)}, AbortFailure{.fatal = true}});
+            RecordFatalAbort(state, result, kernel::UndoDataWriteFailed{});
             return result;
         }
         {
@@ -975,9 +974,7 @@ FlushResult<void, AbortFailure> BlockManager::WriteBlockUndo(const CBlockUndo& b
         // Make sure that the file is closed before we call `FlushUndoFile`.
         if (writer.close() != 0) {
             LogError(m_log, "Failed to close block undo file %s: %s", pos.ToString(), SysErrorString(errno));
-            auto error{_("Failed to close block undo file.")};
-            FatalError(m_opts.notifications, state, error);
-            result.update({util::Error{std::move(error)}, AbortFailure{.fatal = true}});
+            RecordFatalAbort(state, result, kernel::UndoFileCloseFailed{});
             return result;
         }
 
@@ -1121,9 +1118,7 @@ FlushResult<FlatFilePos, AbortFailure> BlockManager::WriteBlock(const CBlock& bl
     auto writer{PolymorphicWriterWrapper{m_block_store->MakeBlockStorageWriter(*result)}};
     if (!writer.IsValid()) {
         LogError(m_log, "OpenBlockFile failed for %s while writing block", result->ToString());
-        auto error{_("Failed to write block.")};
-        m_opts.notifications.fatalError(error);
-        result.update({util::Error{std::move(error)}, AbortFailure{.fatal = true}});
+        RecordFatalAbort(/*state=*/nullptr, result, kernel::BlockWriteFailed{});
         return result;
     }
     {
@@ -1138,8 +1133,8 @@ FlushResult<FlatFilePos, AbortFailure> BlockManager::WriteBlock(const CBlock& bl
 
     if (writer.close() != 0) {
         LogError(m_log, "Failed to close block file %s: %s", result->ToString(), SysErrorString(errno));
-        m_opts.notifications.fatalError(_("Failed to close file when writing block."));
-        return FlatFilePos();
+        RecordFatalAbort(/*state=*/nullptr, result, kernel::BlockFileCloseFailed{});
+        return result;
     }
 
     return result;
@@ -1198,7 +1193,7 @@ static auto InitBlocksdirXorKey(const util::log::Context& log, const BlockManage
     return Obfuscation{obfuscation};
 }
 
-std::unique_ptr<kernel::BlockTreeStore> BlockManager::CreateAndMigrateBlockTree()
+std::unique_ptr<kernel::BlockTreeStore> BlockManager::OpenBlockTree()
 {
     LOCK(::cs_main);
 
@@ -1211,25 +1206,31 @@ std::unique_ptr<kernel::BlockTreeStore> BlockManager::CreateAndMigrateBlockTree(
         return std::make_unique<kernel::BlockTreeStore>(m_opts.block_tree_dir, OpenMode::READ);
     }
 
-    // A legacy LevelDB block tree is not opened. Wipe deletes it. Anything else refuses.
-    if (legacy) {
-        if (!m_opts.wipe_block_tree_data) {
-            throw kernel::BlockTreeStoreError(strprintf(
-                "Legacy leveldb block tree at %s is not migrated by this kernel",
-                fs::PathToString(m_opts.block_tree_dir)));
-        }
+    const OpenMode open_mode{m_opts.wipe_block_tree_data ? OpenMode::WIPE : OpenMode::WRITE};
+    if (!legacy) {
+        return std::make_unique<kernel::BlockTreeStore>(m_opts.block_tree_dir, open_mode);
+    }
+
+    // -reindex / wipe: drop legacy LevelDB files without reading them. Content
+    // migration of LevelDB indexes is node-only (MaybeMigrateLegacyBlockTree).
+    if (m_opts.wipe_block_tree_data) {
         LogInfo(m_log, "Detected legacy leveldb block tree db - removing it");
-        std::error_code ec;
-        fs::remove_all(m_opts.block_tree_dir, ec);
-        if (ec) {
+        if (!kernel::RemoveLegacyLevelDBFiles(m_opts.block_tree_dir)) {
             throw kernel::BlockTreeStoreError(strprintf(
                 "Failed to remove legacy leveldb block tree db at %s",
                 fs::PathToString(m_opts.block_tree_dir)));
         }
+        if (fs::exists(m_opts.block_tree_dir / "CURRENT")) {
+            throw kernel::BlockTreeStoreError(strprintf(
+                "Legacy leveldb block tree db marker still exists at %s",
+                fs::PathToString(m_opts.block_tree_dir / "CURRENT")));
+        }
+        return std::make_unique<kernel::BlockTreeStore>(m_opts.block_tree_dir, open_mode);
     }
 
-    const OpenMode open_mode{m_opts.wipe_block_tree_data ? OpenMode::WIPE : OpenMode::WRITE};
-    return std::make_unique<kernel::BlockTreeStore>(m_opts.block_tree_dir, open_mode);
+    throw kernel::BlockTreeStoreError(
+        "Unsupported block tree database format found. "
+        "Please restart with bitcoind to migrate the index, or with -reindex.");
 }
 
 BlockManager::BlockManager(util::log::Logger& logger, const util::SignalInterrupt& interrupt, Options opts)
@@ -1242,7 +1243,7 @@ BlockManager::BlockManager(util::log::Logger& logger, const util::SignalInterrup
       m_undo_store{std::make_unique<FileBlockStore>(logger, m_opts.blocks_dir, "rev", UNDOFILE_CHUNK_SIZE, m_obfuscation)},
       m_block_store{std::make_unique<FileBlockStore>(logger, m_opts.blocks_dir, "blk", m_opts.fast_prune ? 0x4000 /* 16kB */ : BLOCKFILE_CHUNK_SIZE, m_obfuscation)}
 {
-    m_block_tree_db = CreateAndMigrateBlockTree();
+    m_block_tree_db = OpenBlockTree();
 
     if (m_opts.wipe_block_tree_data) {
         m_block_tree_db->WriteReindexing(true);
@@ -1330,9 +1331,9 @@ FlushResult<InterruptResult, AbortFailure> ImportBlocks(ChainstateManager& chain
 
     // scan for better chains in the block chain database, that are not yet connected in the active best chain
     if (auto activate_result = chainman.ActivateBestChains(); !activate_result) {
-        chainman.GetNotifications().fatalError(util::ErrorString(activate_result));
-        result.update(activate_result);
+        RecordFatalAbort(/*state=*/nullptr, result, kernel::ActivateBestChainsFailed{util::ErrorString(activate_result).original});
     }
+    NotifyFatalAbort(chainman.GetNotifications(), result);
     // End scope of ImportingNow
     return result;
 }
@@ -1350,4 +1351,4 @@ std::ostream& operator<<(std::ostream& os, const BlockfileCursor& cursor) {
     os << strprintf("BlockfileCursor(file_num=%d, undo_height=%d)", cursor.file_num, cursor.undo_height);
     return os;
 }
-} // namespace node
+} // namespace kernel

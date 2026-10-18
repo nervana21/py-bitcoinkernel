@@ -2,7 +2,9 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#ifndef BITCOINKERNEL_BUILD
 #define BITCOINKERNEL_BUILD
+#endif
 
 #include <kernel/bitcoinkernel.h>
 
@@ -14,12 +16,13 @@
 #include <kernel/chainparams.h>
 #include <kernel/checks.h>
 #include <kernel/context.h>
+#include <kernel/error.h>
 #include <kernel/mempool_interface.h>
 #include <kernel/notifications_interface.h>
 #include <kernel/result.h>
 #include <kernel/warning.h>
 #include <node/blockstorage.h>
-#include <node/chainstate.h>
+#include <kernel/chainstate.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
@@ -37,6 +40,7 @@
 #include <util/fs.h>
 #include <util/hasher.h>
 #include <util/log.h>
+#include <util/overloaded.h>
 #include <util/result.h>
 #include <util/signalinterrupt.h>
 #include <util/stdmutex.h>
@@ -237,6 +241,39 @@ btck_SigVersion cast_btck_sig_version(SigVersion version)
     assert(false);
 }
 
+btck_FatalError cast_btck_fatal_error(const kernel::FatalError& error)
+{
+    return std::visit(util::Overloaded{
+        [](const kernel::ActivateBestChainsFailed&) { return btck_FatalError_ACTIVATE_BEST_CHAINS_FAILED; },
+        [](const kernel::AssumeutxoDataNotFound&) { return btck_FatalError_ASSUMEUTXO_DATA_NOT_FOUND; },
+        [](const kernel::BlockDisconnectFailed&) { return btck_FatalError_BLOCK_DISCONNECT_FAILED; },
+        [](const kernel::BlockFileCloseFailed&) { return btck_FatalError_BLOCK_FILE_CLOSE_FAILED; },
+        [](const kernel::BlockReadFailed&) { return btck_FatalError_BLOCK_READ_FAILED; },
+        [](const kernel::BlockWriteFailed&) { return btck_FatalError_BLOCK_WRITE_FAILED; },
+        [](const kernel::CorruptBlockFound&) { return btck_FatalError_CORRUPT_BLOCK_FOUND; },
+        [](const kernel::DiskSpaceTooLow&) { return btck_FatalError_DISK_SPACE_TOO_LOW; },
+        [](const kernel::SnapshotChainstateDirRemovalFailed&) { return btck_FatalError_SNAPSHOT_CHAINSTATE_DIR_REMOVAL_FAILED; },
+        [](const kernel::SnapshotChainstateRenameFailed&) { return btck_FatalError_SNAPSHOT_CHAINSTATE_RENAME_FAILED; },
+        [](const kernel::SnapshotValidationFailed&) { return btck_FatalError_SNAPSHOT_VALIDATION_FAILED; },
+        [](const kernel::SystemErrorWhileFlushing&) { return btck_FatalError_SYSTEM_ERROR_WHILE_FLUSHING; },
+        [](const kernel::SystemErrorWhileLoadingExternalBlockFile&) { return btck_FatalError_SYSTEM_ERROR_WHILE_LOADING_EXTERNAL_BLOCK_FILE; },
+        [](const kernel::SystemErrorWhileSavingBlock&) { return btck_FatalError_SYSTEM_ERROR_WHILE_SAVING_BLOCK; },
+        [](const kernel::UndoDataWriteFailed&) { return btck_FatalError_UNDO_DATA_WRITE_FAILED; },
+        [](const kernel::UndoFileCloseFailed&) { return btck_FatalError_UNDO_FILE_CLOSE_FAILED; },
+    }, error);
+}
+
+btck_FlushError cast_btck_flush_error(kernel::FlushError error)
+{
+    switch (error) {
+    case kernel::FlushError::BLOCK_FILE_FLUSH_FAILED:
+        return btck_FlushError_BLOCK_FILE_FLUSH_FAILED;
+    case kernel::FlushError::UNDO_FILE_FLUSH_FAILED:
+        return btck_FlushError_UNDO_FILE_FLUSH_FAILED;
+    } // no default case, so the compiler can warn about missing cases
+    assert(false);
+}
+
 constexpr btck_LogLevel to_btck(util::log::Level level)
 {
     switch (level) {
@@ -263,7 +300,7 @@ constexpr btck_LogCategory to_btck(BCLog::LogFlags flag)
 {
     switch (flag) {
     case BCLog::LogFlags::ALL: {
-        return btck_LogCategory_ALL;
+        return btck_LogCategory_NONE;
     }
     case BCLog::LogFlags::BENCH: {
         return btck_LogCategory_BENCH;
@@ -305,10 +342,10 @@ constexpr btck_LogCategory to_btck(BCLog::LogFlags flag)
     }
     default: {
         // Every category the kernel library can emit must be mapped above. This cannot be enforced
-        // at compile time, so abort in debug builds to catch it early, but deliver the entry as
-        // UNKNOWN in release builds rather than dropping it.
+        // at compile time, so abort in debug builds to catch it early, and deliver the entry as
+        // uncategorized otherwise.
         Assume(false);
-        return btck_LogCategory_UNKNOWN;
+        return btck_LogCategory_NONE;
     }
     }
 }
@@ -354,13 +391,13 @@ public:
     {
         if (m_cbs.warning_unset) m_cbs.warning_unset(m_cbs.user_data, cast_btck_warning(id));
     }
-    void flushError(const bilingual_str& message) override
+    void flushError(kernel::FlushError error) override
     {
-        if (m_cbs.flush_error) m_cbs.flush_error(m_cbs.user_data, message.original.c_str(), message.original.length());
+        if (m_cbs.flush_error) m_cbs.flush_error(m_cbs.user_data, cast_btck_flush_error(error));
     }
-    void fatalError(const bilingual_str& message) override
+    void fatalError(const kernel::FatalError& error) override
     {
-        if (m_cbs.fatal_error) m_cbs.fatal_error(m_cbs.user_data, message.original.c_str(), message.original.length());
+        if (m_cbs.fatal_error) m_cbs.fatal_error(m_cbs.user_data, cast_btck_fatal_error(error));
     }
 };
 
@@ -558,9 +595,9 @@ public:
 struct ChainstateManagerOptions {
     mutable Mutex m_mutex;
     ChainstateManager::Options m_chainman_options GUARDED_BY(m_mutex);
-    node::BlockManager::Options m_blockman_options GUARDED_BY(m_mutex);
+    kernel::BlockManager::Options m_blockman_options GUARDED_BY(m_mutex);
     std::shared_ptr<const Context> m_context;
-    node::ChainstateLoadOptions m_chainstate_load_options GUARDED_BY(m_mutex);
+    kernel::ChainstateLoadOptions m_chainstate_load_options GUARDED_BY(m_mutex);
     uint64_t m_db_cache_bytes GUARDED_BY(m_mutex){DEFAULT_KERNEL_CACHE};
 
     ChainstateManagerOptions(const std::shared_ptr<const Context>& context, const fs::path& data_dir, const fs::path& blocks_dir)
@@ -570,14 +607,14 @@ struct ChainstateManagerOptions {
               .mempool_interface = *context->m_mempool,
               .notifications = *context->m_notifications,
               .signals = context->m_signals.get()}},
-          m_blockman_options{node::BlockManager::Options{
+          m_blockman_options{kernel::BlockManager::Options{
               .chainparams = *context->m_chainparams,
               .blocks_dir = blocks_dir,
               .block_tree_dir = data_dir / "blocks" / "index",
               .notifications = *context->m_notifications,
           }},
           m_context{context},
-          m_chainstate_load_options{node::ChainstateLoadOptions{}}
+          m_chainstate_load_options{kernel::ChainstateLoadOptions{}}
     {
     }
 };
@@ -1054,19 +1091,29 @@ btck_ChainParameters* btck_chain_parameters_create(const btck_ChainType chain_ty
 {
     switch (chain_type) {
     case btck_ChainType_MAINNET: {
-        return btck_ChainParameters::ref(const_cast<CChainParams*>(CChainParams::Main().release()));
+        auto opts{CChainParams::MainNetOptions{}};
+        opts.assumeutxo = MainAssumeutxo();
+        return btck_ChainParameters::ref(const_cast<CChainParams*>(CChainParams::Main(opts).release()));
     }
     case btck_ChainType_TESTNET: {
-        return btck_ChainParameters::ref(const_cast<CChainParams*>(CChainParams::TestNet().release()));
+        auto opts{CChainParams::TestNetOptions{}};
+        opts.assumeutxo = TestNetAssumeutxo();
+        return btck_ChainParameters::ref(const_cast<CChainParams*>(CChainParams::TestNet(opts).release()));
     }
     case btck_ChainType_TESTNET_4: {
-        return btck_ChainParameters::ref(const_cast<CChainParams*>(CChainParams::TestNet4().release()));
+        auto opts{CChainParams::TestNetOptions{}};
+        opts.assumeutxo = TestNet4Assumeutxo();
+        return btck_ChainParameters::ref(const_cast<CChainParams*>(CChainParams::TestNet4(opts).release()));
     }
     case btck_ChainType_SIGNET: {
-        return btck_ChainParameters::ref(const_cast<CChainParams*>(CChainParams::SigNet().release()));
+        auto opts{CChainParams::SigNetOptions{}};
+        opts.assumeutxo = SigNetAssumeutxo();
+        return btck_ChainParameters::ref(const_cast<CChainParams*>(CChainParams::SigNet(opts).release()));
     }
     case btck_ChainType_REGTEST: {
-        return btck_ChainParameters::ref(const_cast<CChainParams*>(CChainParams::RegTest().release()));
+        auto opts{CChainParams::RegTestOptions{}};
+        opts.assumeutxo = RegTestAssumeutxo();
+        return btck_ChainParameters::ref(const_cast<CChainParams*>(CChainParams::RegTest(opts).release()));
     }
     }
     assert(false);
@@ -1364,12 +1411,12 @@ btck_ChainstateManager* btck_chainstate_manager_create(
         const auto chainstate_load_opts{WITH_LOCK(opts.m_mutex, return opts.m_chainstate_load_options)};
 
         const kernel::CacheSizes cache_sizes{WITH_LOCK(opts.m_mutex, return opts.m_db_cache_bytes)};
-        auto load_result{node::LoadChainstate(*chainman, cache_sizes, chainstate_load_opts)};
+        auto load_result{kernel::LoadChainstate(*chainman, cache_sizes, chainstate_load_opts)};
         if (!load_result || IsInterrupted(*load_result)) {
             LogError(opts.m_context->m_log, "Failed to load chain state from your data directory: %s", util::ErrorString(load_result).original);
             return nullptr;
         }
-        auto verify_result{node::VerifyLoadedChainstate(*chainman, chainstate_load_opts)};
+        auto verify_result{kernel::VerifyLoadedChainstate(*chainman, chainstate_load_opts)};
         if (!verify_result || IsInterrupted(*verify_result)) {
             LogError(opts.m_context->m_log, "Failed to verify loaded chain state from your datadir: %s", util::ErrorString(load_result).original);
             return nullptr;
@@ -1403,6 +1450,33 @@ const btck_BlockTreeEntry* btck_chainstate_manager_get_best_entry(const btck_Cha
 {
     auto& chainman = *btck_ChainstateManager::get(chainstate_manager).m_chainman;
     return btck_BlockTreeEntry::ref(chainman.m_blockman.BestHeader());
+}
+
+size_t btck_chainstate_manager_get_block_index_size(const btck_ChainstateManager* chainstate_manager)
+{
+    auto& chainman = *btck_ChainstateManager::get(chainstate_manager).m_chainman;
+    return chainman.m_blockman.BlockIndexSize();
+}
+
+int32_t btck_chainstate_manager_get_tip_height(const btck_ChainstateManager* chainstate_manager)
+{
+    auto& chainman = *btck_ChainstateManager::get(chainstate_manager).m_chainman;
+    return WITH_LOCK(chainman.GetMutex(), return chainman.ActiveHeight());
+}
+
+btck_BlockHash* btck_chainstate_manager_get_tip_block_hash(const btck_ChainstateManager* chainstate_manager)
+{
+    auto& chainman = *btck_ChainstateManager::get(chainstate_manager).m_chainman;
+    LOCK(chainman.GetMutex());
+    const CBlockIndex* tip{chainman.ActiveTip()};
+    if (!tip) return nullptr;
+    return btck_BlockHash::create(tip->GetBlockHash());
+}
+
+int btck_chainstate_manager_is_initial_block_download(const btck_ChainstateManager* chainstate_manager)
+{
+    auto& chainman = *btck_ChainstateManager::get(chainstate_manager).m_chainman;
+    return chainman.IsInitialBlockDownload() ? 1 : 0;
 }
 
 int btck_chainstate_manager_flush(btck_ChainstateManager* chainman)
@@ -1467,7 +1541,7 @@ int btck_chainstate_manager_import_blocks(btck_ChainstateManager* chainman, cons
             }
         }
         auto& chainman_ref{*btck_ChainstateManager::get(chainman).m_chainman};
-        auto result{node::ImportBlocks(chainman_ref, import_files)};
+        auto result{kernel::ImportBlocks(chainman_ref, import_files)};
         if (!result) LogError(btck_ChainstateManager::get(chainman).m_context->m_log, "%s", util::ErrorString(result).original);
         WITH_LOCK(::cs_main, chainman_ref.UpdateIBDStatus());
     } catch (const std::exception& e) {

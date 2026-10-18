@@ -24,7 +24,7 @@
 namespace btck {
 
 enum class LogCategory : btck_LogCategory {
-    ALL = btck_LogCategory_ALL,
+    NONE = btck_LogCategory_NONE,
     BENCH = btck_LogCategory_BENCH,
     BLOCKSTORAGE = btck_LogCategory_BLOCKSTORAGE,
     COINDB = btck_LogCategory_COINDB,
@@ -63,7 +63,7 @@ constexpr std::string_view Name(LogLevel level) noexcept
 constexpr std::string_view Name(LogCategory category) noexcept
 {
     switch (category) {
-    case LogCategory::ALL: return "all";
+    case LogCategory::NONE: return "none";
     case LogCategory::BENCH: return "bench";
     case LogCategory::BLOCKSTORAGE: return "blockstorage";
     case LogCategory::COINDB: return "coindb";
@@ -98,6 +98,30 @@ enum class SynchronizationState : btck_SynchronizationState {
 enum class Warning : btck_Warning {
     UNKNOWN_NEW_RULES_ACTIVATED = btck_Warning_UNKNOWN_NEW_RULES_ACTIVATED,
     LARGE_WORK_INVALID_CHAIN = btck_Warning_LARGE_WORK_INVALID_CHAIN
+};
+
+enum class FatalError : btck_FatalError {
+    ACTIVATE_BEST_CHAINS_FAILED = btck_FatalError_ACTIVATE_BEST_CHAINS_FAILED,
+    ASSUMEUTXO_DATA_NOT_FOUND = btck_FatalError_ASSUMEUTXO_DATA_NOT_FOUND,
+    BLOCK_DISCONNECT_FAILED = btck_FatalError_BLOCK_DISCONNECT_FAILED,
+    BLOCK_FILE_CLOSE_FAILED = btck_FatalError_BLOCK_FILE_CLOSE_FAILED,
+    BLOCK_READ_FAILED = btck_FatalError_BLOCK_READ_FAILED,
+    BLOCK_WRITE_FAILED = btck_FatalError_BLOCK_WRITE_FAILED,
+    CORRUPT_BLOCK_FOUND = btck_FatalError_CORRUPT_BLOCK_FOUND,
+    DISK_SPACE_TOO_LOW = btck_FatalError_DISK_SPACE_TOO_LOW,
+    SNAPSHOT_CHAINSTATE_DIR_REMOVAL_FAILED = btck_FatalError_SNAPSHOT_CHAINSTATE_DIR_REMOVAL_FAILED,
+    SNAPSHOT_CHAINSTATE_RENAME_FAILED = btck_FatalError_SNAPSHOT_CHAINSTATE_RENAME_FAILED,
+    SNAPSHOT_VALIDATION_FAILED = btck_FatalError_SNAPSHOT_VALIDATION_FAILED,
+    SYSTEM_ERROR_WHILE_FLUSHING = btck_FatalError_SYSTEM_ERROR_WHILE_FLUSHING,
+    SYSTEM_ERROR_WHILE_LOADING_EXTERNAL_BLOCK_FILE = btck_FatalError_SYSTEM_ERROR_WHILE_LOADING_EXTERNAL_BLOCK_FILE,
+    SYSTEM_ERROR_WHILE_SAVING_BLOCK = btck_FatalError_SYSTEM_ERROR_WHILE_SAVING_BLOCK,
+    UNDO_DATA_WRITE_FAILED = btck_FatalError_UNDO_DATA_WRITE_FAILED,
+    UNDO_FILE_CLOSE_FAILED = btck_FatalError_UNDO_FILE_CLOSE_FAILED
+};
+
+enum class FlushError : btck_FlushError {
+    BLOCK_FILE_FLUSH_FAILED = btck_FlushError_BLOCK_FILE_FLUSH_FAILED,
+    UNDO_FILE_FLUSH_FAILED = btck_FlushError_UNDO_FILE_FLUSH_FAILED
 };
 
 enum class ValidationMode : btck_ValidationMode {
@@ -1163,9 +1187,9 @@ public:
 
     virtual void WarningUnsetHandler(Warning warning) {}
 
-    virtual void FlushErrorHandler(std::string_view error) {}
+    virtual void FlushErrorHandler(FlushError error) {}
 
-    virtual void FatalErrorHandler(std::string_view error) {}
+    virtual void FatalErrorHandler(FatalError error) {}
 };
 
 template <typename State>
@@ -1324,8 +1348,8 @@ public:
                 .progress = +[](void* user_data, const char* title, size_t title_len, int progress_percent, int resume_possible) { (*static_cast<user_type>(user_data))->ProgressHandler({title, title_len}, progress_percent, resume_possible == 1); },
                 .warning_set = +[](void* user_data, btck_Warning warning, const char* message, size_t message_len) { (*static_cast<user_type>(user_data))->WarningSetHandler(static_cast<Warning>(warning), {message, message_len}); },
                 .warning_unset = +[](void* user_data, btck_Warning warning) { (*static_cast<user_type>(user_data))->WarningUnsetHandler(static_cast<Warning>(warning)); },
-                .flush_error = +[](void* user_data, const char* error, size_t error_len) { (*static_cast<user_type>(user_data))->FlushErrorHandler({error, error_len}); },
-                .fatal_error = +[](void* user_data, const char* error, size_t error_len) { (*static_cast<user_type>(user_data))->FatalErrorHandler({error, error_len}); },
+                .flush_error = +[](void* user_data, btck_FlushError error) { (*static_cast<user_type>(user_data))->FlushErrorHandler(static_cast<FlushError>(error)); },
+                .fatal_error = +[](void* user_data, btck_FatalError error) { (*static_cast<user_type>(user_data))->FatalErrorHandler(static_cast<FatalError>(error)); },
             });
     }
 
@@ -1633,6 +1657,28 @@ public:
     BlockTreeEntry GetBestEntry() const
     {
         return btck_chainstate_manager_get_best_entry(get());
+    }
+
+    size_t GetBlockIndexSize() const
+    {
+        return btck_chainstate_manager_get_block_index_size(get());
+    }
+
+    int32_t GetTipHeight() const
+    {
+        return btck_chainstate_manager_get_tip_height(get());
+    }
+
+    std::optional<BlockHash> GetTipBlockHash() const
+    {
+        auto hash{btck_chainstate_manager_get_tip_block_hash(get())};
+        if (!hash) return std::nullopt;
+        return BlockHash{hash};
+    }
+
+    bool IsInitialBlockDownload() const
+    {
+        return btck_chainstate_manager_is_initial_block_download(get()) != 0;
     }
 
     std::optional<Block> ReadBlock(const BlockTreeEntry& entry) const

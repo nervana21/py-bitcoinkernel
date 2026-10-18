@@ -102,9 +102,10 @@ add_library(bitcoin_kernel STATIC EXCLUDE_FROM_ALL
   kernel/coinstats.cpp
   kernel/context.cpp
   kernel/cs_main.cpp
-  node/blockstorage.cpp
-  node/chainstate.cpp
-  node/utxo_snapshot.cpp
+  kernel/blockstorage.cpp
+  kernel/chainstate.cpp
+  kernel/utxo_snapshot.cpp
+  kernel/chainstatemanager.cpp
   pow.cpp
   script/solver.cpp
   script/sigcache.cpp
@@ -155,6 +156,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   core_io.cpp
   external_signer.cpp
   init/common.cpp
+  ipc/listen.cpp
   key.cpp
   key_io.cpp
   merkleblock.cpp
@@ -297,6 +299,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   txmempool.cpp
   txrequest.cpp
   dbwrapper.cpp
+  node/blocktree_migration.cpp
   kernel/disconnected_transactions.cpp
   $<$<TARGET_EXISTS:bitcoin_wallet>:wallet/init.cpp>
   $<$<NOT:$<TARGET_EXISTS:bitcoin_wallet>>:dummywallet.cpp>
