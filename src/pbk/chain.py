@@ -1,73 +1,22 @@
 import ctypes
 import typing
-from enum import IntEnum
 from pathlib import Path
 
 import pbk.capi.bindings as k
 from pbk.block import (
     Block,
     BlockHash,
-    BlockTreeEntry,
+    BlockHeader,
     BlockSpentOutputs,
-    BlockValidationState,
+    BlockTreeEntry,
 )
 from pbk.capi import KernelOpaquePtr
-from pbk.util.exc import ProcessBlockException, ProcessBlockHeaderException
-from pbk.util.sequence import LazySequence
-
-if typing.TYPE_CHECKING:
-    from pbk import BlockHash, BlockHeader, Context
-
-
-# TODO: add enum auto-generation or testing to ensure it remains in
-# sync with bitcoinkernel.h
-class ChainType(IntEnum):
-    """Enumeration of supported Bitcoin network types."""
-
-    MAINNET = 0  #: Main Bitcoin network
-    TESTNET = 1  #: Test Bitcoin network
-    TESTNET_4 = 2  #: Testnet4 Bitcoin network
-    SIGNET = 3  #: Signet Bitcoin network
-    REGTEST = 4  #: Regression test network
-
-
-class ConsensusParams(KernelOpaquePtr):
-    """View of the consensus parameters of a chain."""
-
-
-class ChainParameters(KernelOpaquePtr):
-    """Chain parameters describing properties of a Bitcoin network.
-
-    Chain parameters define network-specific constants and rules. These
-    are typically passed to [context options][pbk.ContextOptions] when
-    creating a kernel context.
-    """
-
-    _create_fn = k.btck_chain_parameters_create
-    _destroy_fn = k.btck_chain_parameters_destroy
-    _copy_fn = k.btck_chain_parameters_copy
-
-    def __init__(self, chain_type: ChainType):
-        """Create chain parameters for a specific network type.
-
-        Args:
-            chain_type: The Bitcoin network type to configure.
-
-        Raises:
-            RuntimeError: If the C constructor fails (propagated from base class).
-        """
-        super().__init__(chain_type)
-
-    @property
-    def consensus_params(self) -> ConsensusParams:
-        """The consensus parameters for this chain.
-
-        Returns:
-            The consensus parameters. View into these chain parameters.
-        """
-        return ConsensusParams._from_view(
-            k.btck_chain_parameters_get_consensus_params(self), self
-        )
+from pbk.capi.sequence import LazySequence
+from pbk.chainparams import ChainType
+from pbk.context import Context, make_context
+from pbk.exceptions import ProcessBlockException, ProcessBlockHeaderException
+from pbk.validation import BlockValidationState
+from pbk.validation_interface import ValidationInterfaceCallbacks
 
 
 class ChainstateManagerOptions(KernelOpaquePtr):
@@ -84,14 +33,14 @@ class ChainstateManagerOptions(KernelOpaquePtr):
     _create_fn = k.btck_chainstate_manager_options_create
     _destroy_fn = k.btck_chainstate_manager_options_destroy
 
-    def __init__(self, context: "Context", datadir: str, blocks_dir: str):
+    def __init__(self, context: Context, datadir: str, blocks_dir: str):
         """Create chainstate manager options.
 
         Args:
             context: The kernel context to associate with.
-            datadir: Non-empty path to the directory containing chainstate data. The
+            datadir: Path to the directory containing chainstate data. The
                 directory will be created if it doesn't exist.
-            blocks_dir: Non-empty path to the directory containing block data. The
+            blocks_dir: Path to the directory containing block data. The
                 directory will be created if it doesn't exist.
 
         Raises:
@@ -113,9 +62,8 @@ class ChainstateManagerOptions(KernelOpaquePtr):
         """Configure the wiping of the block tree database and the chainstate database.
 
         !!! warning
-            If `wipe_block_tree_db==True`, [pbk.ChainstateManager.__init__][] and [pbk.ChainstateManager.import_blocks][]
-            **must** be called for the wiping to take effect.
-
+            If a wipe is set, [pbk.ChainstateManager.import_blocks][] **must** be called on the
+            resulting [pbk.ChainstateManager][] before it is used for anything else.
 
         Args:
             wipe_block_tree_db: Whether to wipe the block tree database.
@@ -138,6 +86,26 @@ class ChainstateManagerOptions(KernelOpaquePtr):
                 The value is internally clamped between 0 and 15.
         """
         k.btck_chainstate_manager_options_set_worker_threads_num(self, worker_threads)
+
+    def set_database_cache_bytes(self, database_cache_bytes: int) -> None:
+        """Set the total database cache used by the chainstate manager.
+
+        The total cache is split internally between the block tree database,
+        chainstate database, and in-memory coins cache. If this method is not
+        called, the total cache defaults to 450 MiB.
+
+        Args:
+            database_cache_bytes: The total database cache size in bytes.
+                Values below 4 MiB are rejected. On 32-bit systems, values
+                above 1 GiB are also rejected.
+
+        Raises:
+            ValueError: If the value is rejected.
+        """
+        if k.btck_chainstate_manager_options_set_database_cache_bytes(
+            self, database_cache_bytes
+        ):
+            raise ValueError(f"Invalid database cache size: {database_cache_bytes}")
 
     def update_chainstate_db_in_memory(self, chainstate_db_in_memory: bool) -> None:
         """Configure whether to use an in-memory chainstate database.
@@ -516,18 +484,20 @@ class ChainstateManager(KernelOpaquePtr):
         return BlockSpentOutputsMap(self)
 
     @property
-    def best_entry(self) -> BlockTreeEntry:
+    def best_entry(self) -> BlockTreeEntry | None:
         """The BlockTreeEntry whose associated BlockHeader has the most known
         cumulative proof of work.
 
         Returns:
-            The best block tree entry. View into this chainstate manager.
+            The best block tree entry, or None if no block headers have been
+            loaded. View into this chainstate manager.
         """
-        return BlockTreeEntry._from_view(
-            k.btck_chainstate_manager_get_best_entry(self), self
-        )
+        entry = k.btck_chainstate_manager_get_best_entry(self)
+        if not entry:
+            return None
+        return BlockTreeEntry._from_view(entry, self)
 
-    def process_block_header(self, header: "BlockHeader") -> "BlockValidationState":
+    def process_block_header(self, header: BlockHeader) -> BlockValidationState:
         """
         Processes and validates the provided block header.
 
@@ -540,12 +510,47 @@ class ChainstateManager(KernelOpaquePtr):
         Raises:
             ProcessBlockHeaderException: If processing the block header failed. Duplicate block headers do not throw.
         """
-        state_ptr = k.btck_chainstate_manager_process_block_header(self, header)
-        if not state_ptr:
-            raise ProcessBlockHeaderException(-1)
-
-        return BlockValidationState._from_handle(state_ptr)
+        state = k.btck_chainstate_manager_process_block_header(self, header)
+        if not state:
+            raise ProcessBlockHeaderException()
+        return BlockValidationState._from_handle(state)
 
     def __repr__(self) -> str:
         """Return a string representation of the chainstate manager."""
         return f"<ChainstateManager at {hex(id(self))}>"
+
+
+def load_chainman(
+    datadir: Path | str,
+    chain_type: ChainType = ChainType.REGTEST,
+    validation_callbacks: ValidationInterfaceCallbacks | None = None,
+) -> ChainstateManager:
+    """
+    Load and initialize a `ChainstateManager` object, loading its
+    chainstate from disk.
+
+    **IMPORTANT**: `py-bitcoinkernel` requires exclusive access to the
+    data directory. Sharing a data directory with Bitcoin Core will ONLY
+    work when only one of both programs is running at a time.
+
+    Args:
+        datadir: The path of the data directory. If the directory contains an
+            existing `blocks/` and `chainstate/` directory, it will be used to
+            load the chainstate. Otherwise, a new chainstate will be created.
+        chain_type: The type of chain to load.
+        validation_callbacks: Optional callbacks forwarded to `make_context` to
+            receive validation events.
+
+    Returns:
+        A `ChainstateManager` object. Owned handle.
+    """
+    datadir = Path(datadir)
+    context = make_context(chain_type, validation_callbacks=validation_callbacks)
+    blocksdir = datadir / "blocks"
+
+    chain_man_opts = ChainstateManagerOptions(
+        context, str(datadir.absolute()), str(blocksdir.absolute())
+    )
+    chain_man = ChainstateManager(chain_man_opts)
+
+    return chain_man

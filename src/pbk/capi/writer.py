@@ -1,23 +1,23 @@
 import ctypes
+import typing
 from collections.abc import Callable
 
-from pbk.capi.base import KernelOpaquePtr
 import pbk.capi.bindings as k
-from pbk.util.type import UserData
+from pbk.capi.userdata import UserData
 
 
 def _py_callback(
     c_bytes_ptr: ctypes.c_void_p, size: int, byte_writer_ptr: ctypes.c_void_p
 ) -> int:
     """C callback that receives serialized bytes and appends them to a ByteWriter buffer."""
-    byte_writer: "ByteWriter | None" = None
+    byte_writer: ByteWriter | None = None
     try:
         byte_writer = UserData.from_void_ptr(byte_writer_ptr)
         assert byte_writer
         chunk = ctypes.string_at(c_bytes_ptr, size)
         byte_writer.buffer.extend(chunk)
         return 0
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - must not propagate into C, write() re-raises it
         if byte_writer:
             byte_writer.exception = e
         return -1
@@ -31,12 +31,17 @@ class ByteWriter:
         self.buffer = bytearray()
         self.exception = None
 
-    def write(self, to_bytes_func: Callable, obj: KernelOpaquePtr) -> bytes:
-        """Serialize a kernel object to bytes using the provided C function."""
+    def write(self, to_bytes_func: Callable, *args: typing.Any) -> bytes:
+        """Serialize to bytes with a C function that takes a writer callback.
+
+        `args` are the arguments of `to_bytes_func` before the writer
+        callback and its user data, which are always its last two
+        parameters, e.g. the object and the index of the item to serialize.
+        """
         self.buffer.clear()
         self.exception = None
 
-        ret = to_bytes_func(obj, k.btck_WriteBytes(_py_callback), UserData(self))
+        ret = to_bytes_func(*args, k.btck_WriteBytes(_py_callback), UserData(self))
 
         if ret != 0:
             if self.exception:

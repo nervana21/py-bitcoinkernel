@@ -2,8 +2,9 @@
 
 from collections.abc import Callable
 
-import pbk
 import pytest
+
+import pbk
 from pbk.capi import KernelOpaquePtr
 
 
@@ -16,6 +17,8 @@ def test_non_instantiable_classes_raise_type_error() -> None:
         (pbk.Chain, "Chain"),
         (pbk.Coin, "Coin"),
         (pbk.Txid, "Txid"),
+        (pbk.Wtxid, "Wtxid"),
+        (pbk.WitnessStack, "WitnessStack"),
         (pbk.TransactionOutPoint, "TransactionOutPoint"),
         (pbk.TransactionInput, "TransactionInput"),
         (pbk.TransactionSpentOutputs, "TransactionSpentOutputs"),
@@ -40,6 +43,7 @@ def test_instantiable_classes_work() -> None:
     pbk.TransactionOutput(pbk.ScriptPubkey(b"\x00"), 100)
     pbk.ChainParameters(pbk.ChainType.REGTEST)
     pbk.ContextOptions()
+    pbk.TxValidationState()
 
     # Block and Transaction might fail with RuntimeError due to invalid data,
     # but should NOT raise TypeError about instantiation

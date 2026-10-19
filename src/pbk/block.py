@@ -1,84 +1,14 @@
 import ctypes
 import datetime
-import typing
-from enum import IntEnum, IntFlag
+from enum import IntFlag
 
 import pbk.capi.bindings as k
 from pbk.capi import KernelOpaquePtr
+from pbk.capi.sequence import LazySequence
+from pbk.capi.writer import ByteWriter
+from pbk.chainparams import ConsensusParams
 from pbk.transaction import Transaction, TransactionSpentOutputs
-from pbk.util.sequence import LazySequence
-from pbk.writer import ByteWriter
-
-if typing.TYPE_CHECKING:
-    from pbk.chain import ConsensusParams
-
-
-class ValidationMode(IntEnum):
-    """Result of validation processing.
-
-    Indicates whether a data structure (such as a block) passed validation,
-    failed validation, or encountered an error during processing.
-    """
-
-    VALID = 0  #: Validation succeeded
-    INVALID = 1  #: Validation failed due to rule violations
-    INTERNAL_ERROR = 2  #: An error occurred during validation processing
-
-
-class BlockValidationResult(IntEnum):
-    """Specific reason why a block failed validation.
-
-    Provides detailed information about which validation rule was violated
-    when a block is rejected. These results help diagnose why blocks fail
-    to be accepted into the blockchain.
-    """
-
-    UNSET = 0  #: Initial value, block has not yet been rejected
-    CONSENSUS = 1  #: Invalid by consensus rules (excluding specific reasons below)
-    CACHED_INVALID = 2  #: Block was previously cached as invalid, reason not stored
-    INVALID_HEADER = 3  #: Invalid proof of work or timestamp too old
-    MUTATED = 4  #: Block data didn't match the data committed to by the PoW
-    MISSING_PREV = 5  #: The previous block this builds on is not available
-    INVALID_PREV = 6  #: A block this one builds on is invalid
-    TIME_FUTURE = 7  #: Block timestamp was more than 2 hours in the future
-    HEADER_LOW_WORK = 8  #: Block header may be on a too-little-work chain
-
-
-class BlockValidationState(KernelOpaquePtr):
-    """State of a block during validation.
-
-    Contains information about whether validation was successful and, if not,
-    which specific validation step failed. This state is provided to validation
-    interface callbacks to communicate detailed validation results.
-    """
-
-    _create_fn = k.btck_block_validation_state_create
-    _destroy_fn = k.btck_block_validation_state_destroy
-    _copy_fn = k.btck_block_validation_state_copy
-
-    def __init__(self):
-        """Create a block validation state."""
-        super().__init__()
-
-    @property
-    def validation_mode(self) -> ValidationMode:
-        """Overall validation result.
-
-        Returns:
-            Whether the block is valid, invalid, or encountered an error.
-        """
-        return ValidationMode(k.btck_block_validation_state_get_validation_mode(self))
-
-    @property
-    def block_validation_result(self) -> BlockValidationResult:
-        """Specific validation failure reason.
-
-        Returns:
-            The granular reason why validation failed, or UNSET if valid.
-        """
-        return BlockValidationResult(
-            k.btck_block_validation_state_get_block_validation_result(self)
-        )
+from pbk.validation import BlockValidationState, ValidationMode
 
 
 class BlockHash(KernelOpaquePtr):
@@ -251,7 +181,7 @@ class BlockTreeEntry(KernelOpaquePtr):
 
     def __repr__(self) -> str:
         """Return a string representation of the block tree entry."""
-        return f"<BlockTreeEntry height={self.height} hash={str(self.block_hash)}>"
+        return f"<BlockTreeEntry height={self.height} hash={self.block_hash}>"
 
 
 class TransactionSequence(LazySequence[Transaction]):
@@ -327,6 +257,17 @@ class BlockHeader(KernelOpaquePtr):
         return BlockHash._from_view(k.btck_block_header_get_prev_hash(self), self)
 
     @property
+    def merkle_root(self) -> bytes:
+        """The Merkle root.
+
+        Returns:
+            The 32-byte Merkle root.
+        """
+        output = (ctypes.c_ubyte * 32)()
+        k.btck_block_header_get_merkle_root(self, output)
+        return bytes(output)
+
+    @property
     def timestamp(self) -> datetime.datetime:
         """The timestamp."""
         epoch = k.btck_block_header_get_timestamp(self)
@@ -366,7 +307,7 @@ class BlockHeader(KernelOpaquePtr):
 
     def __repr__(self) -> str:
         """Return a string representation of the block header."""
-        return f"<Block header hash={str(self.block_hash)}>"
+        return f"<Block header hash={self.block_hash}>"
 
 
 class BlockCheckFlags(IntFlag):
@@ -376,10 +317,17 @@ class BlockCheckFlags(IntFlag):
     Multiple flags can be combined using bitwise OR operations.
     """
 
-    BASE = 0  #: Run only the base context-free block checks
-    POW = 1 << 0  #: Run CheckProofOfWork via CheckBlockHeader
-    MERKLE = 1 << 1  #: Verify the merkle root and detect mutation
-    ALL = POW | MERKLE  #: Enable all optional context-free block checks
+    BASE = 0
+    """Run the base context-free block checks only"""
+
+    POW = 1 << 0
+    """Run CheckProofOfWork via CheckBlockHeader"""
+
+    MERKLE = 1 << 1
+    """Verify merkle root (and mutation detection)"""
+
+    ALL = POW | MERKLE
+    """Enable all optional context-free block checks"""
 
 
 class Block(KernelOpaquePtr):
@@ -447,7 +395,7 @@ class Block(KernelOpaquePtr):
 
     def check(
         self,
-        consensus_params: "ConsensusParams",
+        consensus_params: ConsensusParams,
         flags: BlockCheckFlags = BlockCheckFlags.ALL,
     ) -> BlockValidationState:
         """Perform context-free validation checks on this block.
@@ -473,7 +421,7 @@ class Block(KernelOpaquePtr):
 
     def __repr__(self) -> str:
         """Return a string representation of the block."""
-        return f"<Block hash={str(self.block_hash)} txs={len(self.transactions)}>"
+        return f"<Block hash={self.block_hash} txs={len(self.transactions)}>"
 
 
 class TransactionSpentOutputsSequence(LazySequence[TransactionSpentOutputs]):

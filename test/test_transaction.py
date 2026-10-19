@@ -1,8 +1,8 @@
 import gc
+import hashlib
 import weakref
 
 import pbk
-
 
 SAMPLE_TX_HEX = "010000000320ad43984a790ca5a964904686b8e17732ccf9d0d5f679f7675623e971890385010000006b483045022100ad4777681f360e7791d3f866006415b6511723abbd75a318c5a91c951122c03602202a5eadc8054dbf1d269a6b17c116bac42b4c110da693f2226a0ef7fcd659395f0121026de67c5ce81b6adf330ac6201a7339efa5503a49f1bf95a88c89e214a62dcac8feffffffcbe2144e8fad7e1e1cc270f7dbc75f64f961a5279696160e4a108bd84ebe5ca0ba0200006a47304402204eeb81c63817e960e7854393f64b212480d2dfc0be583601b0702251e5a63de002200b2f37228768a0547ea037ac47e2d948c411c4fdd2ab74f6f21d6805a5a380fb01210364492cd3a5a9365dcb46bb509381ec002052ee8df5a89d6192747c6eb15fe32dfeffffff08ef4370f8930e28110fc172475e42adf9bb0c11cf764e2c61b536a314946f76010000006a47304402203455335b54e31b0dcb82340e8ad7a4ef583da1923e0d2a9628d5728f5258c058022030d0134897a2f8d7303d3abfdd6a08c593acbb0b91d43287af4ac909e7ebf7bd01210267a46854fe5c0ac26049eb48b95cbfce7cc1e3f6baf540f3c8d3b80fda65bc53feffffff0240420f00000000001976a9140542e43d197f1a2e525d02e95ab70a2517e625a888acf9430f00000000001976a914b6bc75e3a6e8be9a86caab8cbeebb640d7468d4388ac9f680600"
 
@@ -18,7 +18,7 @@ def test_transaction() -> None:
         str(txid) == "9ababd66265528586981359efbf6b4c303430503e90d811c24d431cfd3994c55"
     )
 
-    assert txid == txid
+    assert txid == tx.txid
     assert txid != 0
 
     # Test Txid __repr__ - shows internal format (not evaluable since Txid can't be constructed)
@@ -85,6 +85,19 @@ def test_transaction() -> None:
     # Each input has nSequence == 0xFFFFFFFE (feffffff in the serialized data).
     for tx_input in tx.inputs:
         assert tx_input.sequence == 0xFFFFFFFE
+
+    assert tx.version == 1
+    assert not tx.has_witness
+    # Without witness data, the wtxid commits to the same bytes as the txid.
+    assert bytes(tx.wtxid) == bytes(tx.txid)
+    assert tx.wtxid == tx.wtxid
+    assert tx.wtxid != tx.txid  # a Wtxid never equals a Txid
+
+    # The first input's scriptSig is 0x6b (107) bytes, starting at byte 42.
+    assert tx.inputs[0].script_sig == ser_tx[42 : 42 + 0x6B]
+    for tx_input in tx.inputs:
+        assert len(tx_input.witness_stack) == 0
+        assert list(tx_input.witness_stack) == []
 
 
 def test_transaction_input_sequence_per_input() -> None:
@@ -159,3 +172,74 @@ def test_txid_detach_is_chainable() -> None:
     del tx
     gc.collect()
     assert bytes(txid) == expected
+
+
+def test_transaction_check() -> None:
+    tx = pbk.Transaction(bytes.fromhex(SAMPLE_TX_HEX))
+    state = tx.check()
+    assert state.validation_mode == pbk.ValidationMode.VALID
+    assert state.tx_validation_result == pbk.TxValidationResult.UNSET
+    assert repr(state) == "<TxValidationState mode=VALID result=UNSET>"
+
+    # Two inputs that spend the same outpoint violate consensus.
+    duplicate_input_hex = "aa" * 32 + "00000000" + "00" + "ffffffff"
+    output_hex = "00f2052a01000000" + "1976a914" + "00" * 20 + "88ac"
+    raw = "02000000" + "02" + duplicate_input_hex * 2 + "01" + output_hex + "00000000"
+    state = pbk.Transaction(bytes.fromhex(raw)).check()
+    assert state.validation_mode == pbk.ValidationMode.INVALID
+    assert state.tx_validation_result == pbk.TxValidationResult.CONSENSUS
+
+
+def _sha256d(data: bytes) -> bytes:
+    return hashlib.sha256(hashlib.sha256(data).digest()).digest()
+
+
+def test_transaction_witness() -> None:
+    witness_items = [bytes([0x30]) * 71, bytes([0x02]) * 33]
+    witness_hex = "02" + "".join(
+        f"{len(item):02x}" + item.hex() for item in witness_items
+    )
+    # SegWit spends have an empty scriptSig.
+    input_hex = "aa" * 32 + "00000000" + "00" + "ffffffff"
+    output_hex = "00f2052a01000000" + "1600140000000000000000000000000000000000000000"
+    no_witness_hex = "03000000" + "01" + input_hex + "01" + output_hex + "00000000"
+    witness_tx_hex = (
+        "03000000"
+        + "0001"  # SegWit marker and flag
+        + "01"
+        + input_hex
+        + "01"
+        + output_hex
+        + witness_hex
+        + "00000000"
+    )
+    raw = bytes.fromhex(witness_tx_hex)
+    tx = pbk.Transaction(raw)
+
+    assert bytes(tx) == raw
+    assert tx.version == 3
+    assert tx.has_witness
+    # The txid commits to the transaction without its witness, the wtxid with it.
+    assert bytes(tx.txid) == _sha256d(bytes.fromhex(no_witness_hex))
+    assert bytes(tx.wtxid) == _sha256d(raw)
+    assert str(tx.wtxid) == _sha256d(raw)[::-1].hex()
+    assert repr(tx.wtxid) == f"Wtxid({_sha256d(raw)!r})"
+    assert hash(tx.wtxid) == hash(_sha256d(raw))
+
+    tx_input = tx.inputs[0]
+    assert tx_input.script_sig == b""
+
+    witness_stack = tx_input.witness_stack
+    assert witness_stack._owns_ptr is False
+    assert len(witness_stack) == 2
+    assert list(witness_stack) == witness_items
+    assert witness_stack[-1] == witness_items[-1]
+    assert repr(witness_stack) == "<WitnessStack items=2>"
+
+    # A detached witness stack and wtxid outlive their transaction.
+    witness_stack.detach()
+    wtxid = tx.wtxid.detach()
+    del tx, tx_input
+    gc.collect()
+    assert list(witness_stack) == witness_items
+    assert bytes(wtxid) == _sha256d(raw)

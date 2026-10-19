@@ -1,13 +1,25 @@
 from pathlib import Path
 
-import pbk
 import pytest
-from pbk.util.exc import ProcessBlockException
+
+import pbk
+from pbk.exceptions import ProcessBlockException
 
 
 def test_chain_type() -> None:
     for chain_type in pbk.ChainType:
         pbk.ChainParameters(chain_type)
+
+
+def test_create_signet() -> None:
+    op_true_challenge = bytes.fromhex("51")
+    params = pbk.ChainParameters.create_signet(op_true_challenge)
+    assert params._owns_ptr is True
+    assert isinstance(params.consensus_params, pbk.ConsensusParams)
+
+    opts = pbk.ContextOptions()
+    opts.set_chainparams(params)
+    pbk.Context(opts)
 
 
 def test_consensus_params() -> None:
@@ -45,6 +57,13 @@ def test_chainstate_manager_options(temp_dir: Path) -> None:
         chain_man_opts.set_worker_threads_num(num_threads)
         pbk.ChainstateManager(chain_man_opts)
 
+    for cache_bytes in [4 << 20, 450 << 20]:
+        chain_man_opts.set_database_cache_bytes(cache_bytes)
+        pbk.ChainstateManager(chain_man_opts)
+    for cache_bytes in [0, (4 << 20) - 1]:
+        with pytest.raises(ValueError, match="Invalid database cache size"):
+            chain_man_opts.set_database_cache_bytes(cache_bytes)
+
     chain_man_opts.update_chainstate_db_in_memory(True)
     pbk.ChainstateManager(chain_man_opts)
 
@@ -60,6 +79,20 @@ def test_chainstate_manager(chainman_regtest: pbk.ChainstateManager) -> None:
 
     assert genesis.block_hash in chain_man.block_tree_entries
     assert pbk.BlockHash(bytes(32)) not in chain_man.block_tree_entries
+
+
+def test_best_entry_none_before_import_after_wipe(temp_dir: Path) -> None:
+    context = pbk.make_context(pbk.ChainType.REGTEST)
+    chain_man_opts = pbk.ChainstateManagerOptions(
+        context, str(temp_dir), str(temp_dir / "blocks")
+    )
+    assert chain_man_opts.set_wipe_dbs(True, True) == 0
+    chain_man = pbk.ChainstateManager(chain_man_opts)
+
+    assert chain_man.best_entry is None
+    assert chain_man.import_blocks([]) == 0
+    best_entry = chain_man.best_entry
+    assert best_entry is not None and best_entry.height == 0
 
 
 def test_process_block(temp_dir: Path) -> None:
@@ -89,11 +122,21 @@ def test_process_block_header(temp_dir: Path) -> None:
     header_hex = "010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299"  # block height 1
     header = pbk.BlockHeader(bytes.fromhex(header_hex))
 
-    assert chain_man.best_entry.height == 0
+    best_entry = chain_man.best_entry
+    assert best_entry is not None and best_entry.height == 0
     result = chain_man.process_block_header(header)
+    assert result._owns_ptr is True
     assert result.block_validation_result == pbk.BlockValidationResult.UNSET
     assert result.validation_mode == pbk.ValidationMode.VALID
-    assert chain_man.best_entry.height == 1
+    best_entry = chain_man.best_entry
+    assert best_entry is not None and best_entry.height == 1
+
+    # A header with invalid proof of work is invalid.
+    bad_pow_raw = bytearray(bytes.fromhex(header_hex))
+    bad_pow_raw[76] ^= 0xFF  # Flip bits in nonce
+    result = chain_man.process_block_header(pbk.BlockHeader(bytes(bad_pow_raw)))
+    assert result.validation_mode == pbk.ValidationMode.INVALID
+    assert result.block_validation_result == pbk.BlockValidationResult.INVALID_HEADER
 
 
 def test_chain(chainman_regtest: pbk.ChainstateManager) -> None:

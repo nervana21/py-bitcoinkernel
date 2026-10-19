@@ -1,11 +1,11 @@
 import ctypes
-import typing
 
 import pbk.capi.bindings as k
 from pbk.capi import KernelOpaquePtr
+from pbk.capi.sequence import LazySequence
+from pbk.capi.writer import ByteWriter
 from pbk.script import ScriptPubkey
-from pbk.util.sequence import LazySequence
-from pbk.writer import ByteWriter
+from pbk.validation import TxValidationState, ValidationMode
 
 
 class Txid(KernelOpaquePtr):
@@ -29,7 +29,7 @@ class Txid(KernelOpaquePtr):
         k.btck_txid_to_bytes(self, hash_array)
         return bytes(hash_array)
 
-    def __eq__(self, other: typing.Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         """Check equality with another txid.
 
         Args:
@@ -63,6 +63,63 @@ class Txid(KernelOpaquePtr):
     def __repr__(self) -> str:
         """Return a string representation of the txid."""
         return f"Txid({bytes(self)!r})"
+
+
+class Wtxid(KernelOpaquePtr):
+    """Type-safe identifier for a transaction that commits to witness data.
+
+    Note:
+        Wtxid instances cannot be directly constructed. They are obtained from
+        Transaction objects.
+    """
+
+    _destroy_fn = k.btck_wtxid_destroy
+    _copy_fn = k.btck_wtxid_copy
+
+    def __bytes__(self) -> bytes:
+        """Serialize the wtxid to bytes.
+
+        Returns:
+            The 32-byte wtxid in little-endian byte order.
+        """
+        hash_array = (ctypes.c_ubyte * 32)()
+        k.btck_wtxid_to_bytes(self, hash_array)
+        return bytes(hash_array)
+
+    def __eq__(self, other: object) -> bool:
+        """Check equality with another wtxid.
+
+        Args:
+            other: Object to compare with.
+
+        Returns:
+            True if both are Wtxid instances with equal values.
+        """
+        if not isinstance(other, Wtxid):
+            return False
+        return bool(k.btck_wtxid_equals(self, other))
+
+    def __hash__(self) -> int:
+        """Get hash value for use in sets and dictionaries.
+
+        Returns:
+            Hash of the wtxid bytes.
+        """
+        return hash(bytes(self))
+
+    def __str__(self) -> str:
+        """Get the hexadecimal representation of the wtxid.
+
+        Returns:
+            The wtxid as a 64-character hex string in big-endian
+            byte order (standard Bitcoin display format).
+        """
+        # bytes are serialized in little-endian byte order, typically displayed in big-endian byte order
+        return bytes(self)[::-1].hex()
+
+    def __repr__(self) -> str:
+        """Return a string representation of the wtxid."""
+        return f"Wtxid({bytes(self)!r})"
 
 
 class TransactionOutPoint(KernelOpaquePtr):
@@ -101,7 +158,35 @@ class TransactionOutPoint(KernelOpaquePtr):
 
     def __repr__(self) -> str:
         """Return a string representation of the transaction outpoint."""
-        return f"<TransactionOutPoint txid={str(self.txid)} index={self.index}>"
+        return f"<TransactionOutPoint txid={self.txid} index={self.index}>"
+
+
+class WitnessStack(KernelOpaquePtr, LazySequence[bytes]):
+    """Witness stack of a transaction input.
+
+    Holds a sequence of witness stack items. It supports indexing, iteration
+    and length queries.
+
+    Note:
+        WitnessStack instances cannot be directly constructed. They are
+        obtained from TransactionInput objects.
+    """
+
+    _destroy_fn = k.btck_witness_stack_destroy
+    _copy_fn = k.btck_witness_stack_copy
+
+    def __len__(self) -> int:
+        """Number of items in the witness stack."""
+        return k.btck_witness_stack_count_items(self)
+
+    def _get_item(self, index: int) -> bytes:
+        """Get the witness stack item at the given index."""
+        writer = ByteWriter()
+        return writer.write(k.btck_witness_stack_get_item_at, self, index)
+
+    def __repr__(self) -> str:
+        """Return a string representation of the witness stack."""
+        return f"<WitnessStack items={len(self)}>"
 
 
 class TransactionInput(KernelOpaquePtr):
@@ -132,6 +217,23 @@ class TransactionInput(KernelOpaquePtr):
         """The nSequence value of this input."""
         return k.btck_transaction_input_get_sequence(self)
 
+    @property
+    def script_sig(self) -> bytes:
+        """The serialized script sig of this input."""
+        writer = ByteWriter()
+        return writer.write(k.btck_transaction_input_get_script_sig, self)
+
+    @property
+    def witness_stack(self) -> WitnessStack:
+        """The witness stack of this input.
+
+        Returns:
+            The witness stack. View into this input.
+        """
+        return WitnessStack._from_view(
+            k.btck_transaction_input_get_witness_stack(self), self
+        )
+
     def __repr__(self) -> str:
         """Return a string representation of the transaction input."""
         return f"<TransactionInput {self.out_point!r}>"
@@ -149,7 +251,7 @@ class TransactionOutput(KernelOpaquePtr):
     _destroy_fn = k.btck_transaction_output_destroy
     _copy_fn = k.btck_transaction_output_copy
 
-    def __init__(self, script_pubkey: "ScriptPubkey", amount: int):
+    def __init__(self, script_pubkey: ScriptPubkey, amount: int):
         """Create a transaction output.
 
         Args:
@@ -168,7 +270,7 @@ class TransactionOutput(KernelOpaquePtr):
         return k.btck_transaction_output_get_amount(self)
 
     @property
-    def script_pubkey(self) -> "ScriptPubkey":
+    def script_pubkey(self) -> ScriptPubkey:
         """The spending conditions for this output.
 
         Returns:
@@ -308,9 +410,45 @@ class Transaction(KernelOpaquePtr):
         return Txid._from_view(k.btck_transaction_get_txid(self), self)
 
     @property
+    def has_witness(self) -> bool:
+        """Whether this transaction has witness data."""
+        return bool(k.btck_transaction_has_witness(self))
+
+    @property
+    def wtxid(self) -> Wtxid:
+        """The wtxid of this transaction.
+
+        Returns:
+            The wtxid. View into this transaction.
+        """
+        return Wtxid._from_view(k.btck_transaction_get_wtxid(self), self)
+
+    @property
+    def version(self) -> int:
+        """The version of this transaction."""
+        return k.btck_transaction_get_version(self)
+
+    @property
     def locktime(self) -> int:
         """The nLockTime value of this transaction."""
         return k.btck_transaction_get_locktime(self)
+
+    def check(self) -> TxValidationState:
+        """Run context-free consensus validation on this transaction.
+
+        Performs basic structural consensus checks (Bitcoin Core's
+        `CheckTransaction`) without requiring blockchain state.
+
+        Returns:
+            The resulting validation state. Inspect `validation_mode` to
+            determine whether the transaction passed. Only the UNSET and
+            CONSENSUS validation results are reachable via this method.
+            Owned handle.
+        """
+        state = TxValidationState()
+        ret = k.btck_transaction_check(self, state)
+        assert (ret == 1) == (state.validation_mode == ValidationMode.VALID)
+        return state
 
     def __bytes__(self) -> bytes:
         """Serialize the transaction to bytes.
@@ -324,7 +462,7 @@ class Transaction(KernelOpaquePtr):
 
     def __repr__(self) -> str:
         """Return a string representation of the transaction."""
-        return f"<Transaction txid={str(self.txid)} ins={len(self.inputs)} outs={len(self.outputs)}>"
+        return f"<Transaction txid={self.txid} ins={len(self.inputs)} outs={len(self.outputs)}>"
 
 
 class Coin(KernelOpaquePtr):

@@ -11,7 +11,6 @@ from pathlib import Path
 import pbk.capi.bindings as k
 from pbk.capi import KernelOpaquePtr
 
-
 # bitcoinkernel's logging setters require external synchronization
 LOGGING_LOCK = threading.RLock()
 
@@ -25,20 +24,47 @@ class LogCategory(IntEnum):
     their callback. The connection itself only filters by minimum level.
     """
 
-    ALL = 0  #: Not tied to a specific category
-    BENCH = 1  #: Benchmarking and performance metrics
-    BLOCKSTORAGE = 2  #: Block storage operations
-    COINDB = 3  #: Coin database operations
-    LEVELDB = 4  #: LevelDB database operations
-    MEMPOOL = 5  #: Memory pool (mempool) operations
-    PRUNE = 6  #: Block pruning operations
-    RAND = 7  #: Random number generation
-    REINDEX = 8  #: Blockchain reindexing operations
-    VALIDATION = 9  #: Block and transaction validation
-    KERNEL = 10  #: General kernel operations
-    TXPACKAGES = 11  #: Transaction package handling
-    LOCK = 12  #: Locking and concurrency
-    UNKNOWN = 13  #: Categories not (yet) exposed through the C API
+    ALL = 0
+    """Not tied to a specific category"""
+
+    BENCH = 1
+    """Benchmarking and performance metrics"""
+
+    BLOCKSTORAGE = 2
+    """Block storage operations"""
+
+    COINDB = 3
+    """Coin database operations"""
+
+    LEVELDB = 4
+    """LevelDB database operations"""
+
+    MEMPOOL = 5
+    """Memory pool (mempool) operations"""
+
+    PRUNE = 6
+    """Block pruning operations"""
+
+    RAND = 7
+    """Random number generation"""
+
+    REINDEX = 8
+    """Blockchain reindexing operations"""
+
+    VALIDATION = 9
+    """Block and transaction validation"""
+
+    KERNEL = 10
+    """General kernel operations"""
+
+    TXPACKAGES = 11
+    """Transaction package handling"""
+
+    LOCK = 12
+    """Locking and concurrency"""
+
+    UNKNOWN = 13
+    """Categories not (yet) exposed through the C API"""
 
 
 # TODO: add enum auto-generation or testing to ensure it remains in
@@ -50,11 +76,20 @@ class LogLevel(IntEnum):
     delivered to a LoggingConnection callback.
     """
 
-    TRACE = 0  #: Finest-grained tracing (not mapped to Python logging)
-    DEBUG = 1  #: Debug-level messages with detailed information
-    INFO = 2  #: Informational messages about normal operations
-    WARNING = 3  #: Warning-level messages
-    ERROR = 4  #: Error-level messages
+    TRACE = 0
+    """Finest-grained tracing (not mapped to Python logging)"""
+
+    DEBUG = 1
+    """Debug-level messages with detailed information"""
+
+    INFO = 2
+    """Informational messages about normal operations"""
+
+    WARNING = 3
+    """Warning-level messages"""
+
+    ERROR = 4
+    """Error-level messages"""
 
 
 KERNEL_LEVEL_TO_PYTHON = {
@@ -131,10 +166,7 @@ def is_valid_log_callback(fn: typing.Any) -> bool:
         return False
 
     fn_sig = inspect.signature(fn)
-    if len(fn_sig.parameters) != 1:
-        return False
-
-    return True
+    return len(fn_sig.parameters) == 1
 
 
 class LoggingConnection(KernelOpaquePtr):

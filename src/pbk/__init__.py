@@ -3,13 +3,10 @@ from pbk.block import (
     BlockCheckFlags,
     BlockHash,
     BlockHeader,
-    BlockTreeEntry,
     BlockSpentOutputs,
-    BlockValidationResult,
-    BlockValidationState,
+    BlockTreeEntry,
     TransactionSequence,
     TransactionSpentOutputsSequence,
-    ValidationMode,
 )
 from pbk.chain import (
     BlockMap,
@@ -17,20 +14,25 @@ from pbk.chain import (
     BlockTreeEntryMap,
     BlockTreeEntrySequence,
     Chain,
-    ChainParameters,
     ChainstateManager,
     ChainstateManagerOptions,
-    ChainType,
-    ConsensusParams,
+    load_chainman,
 )
-from pbk.context import Context, ContextOptions
+from pbk.chainparams import ChainParameters, ChainType, ConsensusParams
+from pbk.context import Context, ContextOptions, make_context
+from pbk.exceptions import (
+    KernelException,
+    ProcessBlockException,
+    ProcessBlockHeaderException,
+)
 from pbk.log import (
     KernelLogViewer,
     LogCategory,
     LogEntry,
-    LogLevel,
     LoggingConnection,
+    LogLevel,
 )
+from pbk.notifications import NotificationInterfaceCallbacks
 from pbk.script import (
     PrecomputedTransactionData,
     ScriptPubkey,
@@ -38,46 +40,51 @@ from pbk.script import (
     ScriptVerifyException,
     ScriptVerifyStatus,
 )
+from pbk.testing import set_mock_time
 from pbk.transaction import (
     Coin,
     CoinSequence,
     Transaction,
     TransactionInput,
     TransactionInputSequence,
+    TransactionOutPoint,
     TransactionOutput,
     TransactionOutputSequence,
-    TransactionOutPoint,
     TransactionSpentOutputs,
     Txid,
+    WitnessStack,
+    Wtxid,
 )
-from pbk.util.exc import (
-    KernelException,
-    ProcessBlockException,
-    ProcessBlockHeaderException,
+from pbk.validation import (
+    BlockValidationResult,
+    BlockValidationState,
+    TxValidationResult,
+    TxValidationState,
+    ValidationMode,
 )
-from pbk.validation import ValidationInterfaceCallbacks
+from pbk.validation_interface import ValidationInterfaceCallbacks
 
 __all__ = [
-    "BlockHash",
-    "BlockHeader",
-    "BlockSpentOutputsMap",
-    "BlockTreeEntryMap",
-    "BlockTreeEntry",
-    "BlockTreeEntrySequence",
     "Block",
     "BlockCheckFlags",
+    "BlockHash",
+    "BlockHeader",
     "BlockMap",
     "BlockSpentOutputs",
+    "BlockSpentOutputsMap",
+    "BlockTreeEntry",
+    "BlockTreeEntryMap",
+    "BlockTreeEntrySequence",
     "BlockValidationResult",
     "BlockValidationState",
     "Chain",
     "ChainParameters",
+    "ChainType",
     "ChainstateManager",
     "ChainstateManagerOptions",
-    "ChainType",
     "Coin",
-    "ConsensusParams",
     "CoinSequence",
+    "ConsensusParams",
     "Context",
     "ContextOptions",
     "KernelException",
@@ -86,6 +93,7 @@ __all__ = [
     "LogEntry",
     "LogLevel",
     "LoggingConnection",
+    "NotificationInterfaceCallbacks",
     "PrecomputedTransactionData",
     "ProcessBlockException",
     "ProcessBlockHeaderException",
@@ -96,74 +104,20 @@ __all__ = [
     "Transaction",
     "TransactionInput",
     "TransactionInputSequence",
+    "TransactionOutPoint",
     "TransactionOutput",
     "TransactionOutputSequence",
-    "TransactionSpentOutputsSequence",
-    "TransactionOutPoint",
     "TransactionSequence",
     "TransactionSpentOutputs",
+    "TransactionSpentOutputsSequence",
+    "TxValidationResult",
+    "TxValidationState",
     "Txid",
-    "ValidationMode",
     "ValidationInterfaceCallbacks",
+    "ValidationMode",
+    "WitnessStack",
+    "Wtxid",
+    "load_chainman",
+    "make_context",
+    "set_mock_time",
 ]
-
-from pathlib import Path
-
-
-def make_context(
-    chain_type: ChainType = ChainType.REGTEST,
-    validation_callbacks: ValidationInterfaceCallbacks | None = None,
-) -> Context:
-    """Build a `Context` for the given chain type.
-
-    Args:
-        chain_type: The chain parameters to use.
-        validation_callbacks: Optional callbacks to receive validation events
-            (block connected, disconnected, etc.). See
-            `ValidationInterfaceCallbacks` for the available events.
-
-    Returns:
-        A new `Context`. Owned handle.
-    """
-    chain_params = ChainParameters(chain_type)
-    opts = ContextOptions()
-    opts.set_chainparams(chain_params)
-    if validation_callbacks is not None:
-        opts.set_validation_interface(validation_callbacks)
-    return Context(opts)
-
-
-def load_chainman(
-    datadir: Path | str,
-    chain_type: ChainType = ChainType.REGTEST,
-    validation_callbacks: ValidationInterfaceCallbacks | None = None,
-) -> ChainstateManager:
-    """
-    Load and initialize a `ChainstateManager` object, loading its
-    chainstate from disk.
-
-    **IMPORTANT**: `py-bitcoinkernel` requires exclusive access to the
-    data directory. Sharing a data directory with Bitcoin Core will ONLY
-    work when only one of both programs is running at a time.
-
-    Args:
-        datadir: The path of the data directory. If the directory contains an
-            existing `blocks/` and `chainstate/` directory, it will be used to
-            load the chainstate. Otherwise, a new chainstate will be created.
-        chain_type: The type of chain to load.
-        validation_callbacks: Optional callbacks forwarded to `make_context` to
-            receive validation events.
-
-    Returns:
-        A `ChainstateManager` object. Owned handle.
-    """
-    datadir = Path(datadir)
-    context = make_context(chain_type, validation_callbacks=validation_callbacks)
-    blocksdir = datadir / "blocks"
-
-    chain_man_opts = ChainstateManagerOptions(
-        context, str(datadir.absolute()), str(blocksdir.absolute())
-    )
-    chain_man = ChainstateManager(chain_man_opts)
-
-    return chain_man

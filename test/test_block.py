@@ -1,6 +1,6 @@
-import pbk
-
 import pytest
+
+import pbk
 
 # A height-1 regtest block built on the regtest genesis. Identical to
 # the first entry in test/data/regtest/blocks.txt with the nonce bumped
@@ -73,7 +73,6 @@ def test_block_tree_entry_get_ancestor_fork(
 def test_block_hash(chainman_regtest: pbk.ChainstateManager) -> None:
     hash_zero = pbk.BlockHash(b"0" * 32)
 
-    assert hash_zero == hash_zero
     assert hash_zero == pbk.BlockHash(b"0" * 32)
     assert hash_zero != pbk.BlockHash(b"1" * 32)
 
@@ -136,6 +135,8 @@ def test_block() -> None:
 
     assert len(block.transactions) == 1
     assert block.block_header.block_hash == block.block_hash
+    # The Merkle root of a block with one transaction is the txid of that transaction.
+    assert block.block_header.merkle_root == bytes(block.transactions[0].txid)
 
     # Test __repr__
     assert repr(block) == f"<Block hash={GENESIS_BLOCK_HASH_HEX} txs=1>"
@@ -167,6 +168,7 @@ def test_block_check_invalid_merkle() -> None:
     state = bad_block.check(consensus_params, pbk.BlockCheckFlags.MERKLE)
     assert state.validation_mode == pbk.ValidationMode.INVALID
     assert state.block_validation_result == pbk.BlockValidationResult.MUTATED
+    assert repr(state) == "<BlockValidationState mode=INVALID result=MUTATED>"
 
     state = bad_block.check(consensus_params, pbk.BlockCheckFlags.BASE)
     assert state.validation_mode == pbk.ValidationMode.VALID
