@@ -132,7 +132,7 @@ class LogEntry:
     def _from_c(cls, entry: k.btck_LogEntry) -> "LogEntry":
         """Build a LogEntry from a ctypes btck_LogEntry structure."""
 
-        def _decode(ptr: ctypes.POINTER(ctypes.c_char), length: int) -> str:
+        def _decode(ptr: typing.Any, length: int) -> str:
             if not ptr or length <= 0:
                 return ""
             return ctypes.string_at(ptr, length).decode("utf-8", errors="replace")
@@ -215,9 +215,7 @@ class LoggingConnection(KernelOpaquePtr):
     ) -> k.btck_LogCallback:  # ty: ignore[invalid-type-form]
         """Wrap a Python callback for use with the C logging API."""
 
-        def wrapped(
-            _user_data: None, entry_ptr: ctypes.POINTER(k.btck_LogEntry)
-        ) -> None:
+        def wrapped(_user_data: None, entry_ptr: typing.Any) -> None:
             if not entry_ptr:
                 return
             fn(LogEntry._from_c(entry_ptr.contents))
