@@ -288,9 +288,12 @@ class KernelLogViewer:
         allowed = set(self.categories)
 
         def callback(entry: LogEntry) -> None:
-            if allowed and entry.category not in allowed:
-                if entry.category != LogCategory.ALL:
-                    return
+            if (
+                allowed
+                and entry.category not in allowed
+                and entry.category != LogCategory.ALL
+            ):
+                return
             py_level = KERNEL_LEVEL_TO_PYTHON.get(entry.level, logging.INFO)
             record_logger = logger
             if entry.category not in (LogCategory.ALL, LogCategory.UNKNOWN):
