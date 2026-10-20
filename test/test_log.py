@@ -45,4 +45,7 @@ def test_kernel_log_viewer(caplog: pytest.LogCaptureFixture) -> None:
     with pytest.raises(RuntimeError):
         pbk.ChainstateManagerOptions(context, "", "")
 
-    assert any("Failed to create chainstate manager options" in r.message for r in caplog.records)
+    assert any(
+        "Failed to create chainstate manager options" in r.message
+        for r in caplog.records
+    )

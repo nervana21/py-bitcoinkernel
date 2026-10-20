@@ -283,7 +283,9 @@ class KernelLogViewer:
             return self._logger.getChild(category.name.upper())
         return self._logger
 
-    def _create_log_callback(self, logger: logging.Logger) -> Callable[["LogEntry"], None]:
+    def _create_log_callback(
+        self, logger: logging.Logger
+    ) -> Callable[["LogEntry"], None]:
         """Create a callback that forwards LogEntry values to Python logging."""
         allowed = set(self.categories)
 
@@ -300,7 +302,9 @@ class KernelLogViewer:
                 record_logger = logger.getChild(entry.category.name.upper())
             pathname = entry.file_name
             filename = Path(pathname).name if pathname else ""
-            created = entry.timestamp_ns / 1_000_000_000.0 if entry.timestamp_ns else 0.0
+            created = (
+                entry.timestamp_ns / 1_000_000_000.0 if entry.timestamp_ns else 0.0
+            )
             record = logging.makeLogRecord(
                 {
                     "name": record_logger.name,
