@@ -162,6 +162,16 @@ struct Options {
     bool evaluate_when_disabled{level >= Level::Info};
 };
 
+/// A format string for a log entry. The logger appends the trailing newline,
+/// so reject one in the format.
+template <unsigned num_params>
+struct FormatString : util::ConstevalFormatString<num_params> {
+    consteval FormatString(const char* str) : util::ConstevalFormatString<num_params>{str}
+    {
+        if (std::string_view{str}.ends_with('\n')) throw "Format string must not end with a newline";
+    }
+};
+
 /// Object representing context of log messages. Holds a logging category, an
 /// optional log pointer which can be used by the application's log handler to
 /// determine where to log to, and a Format hook to control message formatting.
